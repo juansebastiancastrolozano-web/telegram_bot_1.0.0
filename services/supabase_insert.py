@@ -36,8 +36,19 @@ def limpiar_valores_invalidos(df):
     return df
 
 def insertar_dataframe(tabla, df, columna_unica=None):
-    df = convertir_fechas(df)
-    df = limpiar_valores_invalidos(df)
+    # Convertir todo a string seguro
+    df = df.astype(str)
+
+    # Limpiar valores prohibidos JSON
+    df = df.replace({
+        "nan": None,
+        "NaN": None,
+        "None": None,
+        "NaT": None,
+        "inf": None,
+        "-inf": None,
+        "": None
+    })
 
     datos = df.to_dict(orient="records")
 
