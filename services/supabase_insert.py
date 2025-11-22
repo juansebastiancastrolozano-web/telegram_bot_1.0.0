@@ -1,18 +1,27 @@
-# services/supabase_insert.py
-
 import os
 from supabase import create_client, Client
+import pandas as pd
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+def convertir_fechas(df):
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            df[col] = df[col].dt.strftime("%Y-%m-%d")
+        elif pd.api.types.is_timedelta64_dtype(df[col]):
+            df[col] = df[col].astype(str)
+    return df
+
 def insertar_dataframe(tabla, df, columna_unica=None):
-    datos = df.to_dict(orient="records")
+    df = convertir_fechas(df)
+
+    datos = df.replace({pd.NaT: None}).to_dict(orient="records")
 
     if not datos:
-        return "La tabla quedó vacía, no se insertó nada."
+        return "La tabla está vacía después de procesar."
 
     if columna_unica:
         res = supabase.table(tabla).upsert(
