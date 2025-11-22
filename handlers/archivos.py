@@ -57,7 +57,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         resultado = insertar_dataframe(
             tabla_destino,
             df,
-            columna_unica="po_number"  # evita duplicados
+            columna_unica="po_number,product,vendor"
         )
 
         await update.message.reply_text(f"✔️ {resultado}")
