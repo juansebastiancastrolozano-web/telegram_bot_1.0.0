@@ -7,6 +7,7 @@ from handlers.cliente import handle_cliente
 from handlers.finca import handle_finca
 from handlers.help import handle_help
 from handlers.archivos import handle_file
+from handlers.tabla import set_tabla
 import requests
 
 # Cargar variables del entorno
@@ -63,6 +64,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("finca", handle_finca))
     app.add_handler(CommandHandler("help", handle_help))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+    app.add_handler(CommandHandler("tabla", set_tabla))
 
     print("🤖 Bot iniciado... esperando mensajes.")
     app.run_polling()
