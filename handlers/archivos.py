@@ -1,12 +1,9 @@
-# handlers/archivos.py
-
 import os
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from handlers.tabla import user_tablas
 from services.table_loader import cargar_tabla
-from services.table_detector import detectar_tabla
 from services.supabase_insert import insertar_dataframe
 
 UPLOAD_DIR = "uploads"
@@ -25,24 +22,44 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         df = cargar_tabla(ruta)
 
         user_id = update.message.from_user.id
-        tabla_seleccionada = user_tablas.get(user_id)
-
-        if tabla_seleccionada:
-            tabla_destino = tabla_seleccionada
-        else:
-            tabla_destino = detectar_tabla(df)
+        tabla_destino = user_tablas.get(user_id)
 
         if not tabla_destino:
-            await update.message.reply_text(
-                "No pude detectar a qué tabla pertenece.\n"
-                "Usa /tabla <nombre> antes de subir el archivo."
-            )
+            await update.message.reply_text("Primero selecciona tabla con /tabla confirm_po")
             return
 
-        # Si quieres evitar duplicados, define la columna única
-        columna_unica = "po_number" if tabla_destino == "confirm_po" else None
+        # Mapeo EXCEL → SUPABASE
+        mapeo = {
+            "po": "po_number",
+            "vendor": "vendor",
+            "ship_date": "ship_date",
+            "product": "product",
+            "qty_po": "boxes",
+            "confirmed": "confirmed",
+            "b_t": "box_type",
+            "total_u": "total_units",
+            "cost": "cost",
+            "customer": "customer_name",
+            "origin": "origin",
+            "status": "status",
+            "mark_code": "mark_code",
+            "ship_country": "ship_country",
+            "notes_for_the_vendor": "notes"
+        }
 
-        resultado = insertar_dataframe(tabla_destino, df, columna_unica)
+        # Renombrar columnas
+        df.rename(columns=mapeo, inplace=True)
+
+        # Filtrar solo las columnas que Supabase tiene
+        columnas_validas = list(mapeo.values())
+        df = df[[c for c in df.columns if c in columnas_validas]]
+
+        resultado = insertar_dataframe(
+            tabla_destino,
+            df,
+            columna_unica="po_number"  # evita duplicados
+        )
+
         await update.message.reply_text(f"✔️ {resultado}")
 
     except Exception as e:
