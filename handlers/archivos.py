@@ -50,19 +50,22 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Renombrar columnas
         df.rename(columns=mapeo, inplace=True)
 
-        # ----------------------------------------------------------------------
-        # ⚠️ CORRECCIÓN CRÍTICA: convertir floats ("1.0") a int reales (1)
-        # ----------------------------------------------------------------------
-        cols_int = ["boxes", "confirmed", "total_units"]
+       # ----------------------------------------------------------------------
+# Conversión segura de columnas numéricas a enteros con soporte para NaN
+# ----------------------------------------------------------------------
+import numpy as np
+import pandas as pd
 
-        for col in cols_int:
-            if col in df.columns:
-                df[col] = (
-                    df[col]
-                    .replace(["nan", "None", None, ""], None)
-                    .apply(lambda x: int(float(x)) if x not in [None, "", "nan"] else None)
-                )
-        # ----------------------------------------------------------------------
+cols_int = ["boxes", "confirmed", "total_units"]
+
+for col in cols_int:
+    if col in df.columns:
+        # Convierte a número, todo lo inválido a NaN
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+        # Convierte a entero nullable (acepta NaN)
+        df[col] = df[col].astype("Int64")
+# ----------------------------------------------------------------------
+
 
         # Filtrar solo las columnas válidas para Supabase
         columnas_validas = list(mapeo.values())
