@@ -31,7 +31,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # -------------------------------
-        # Mapeo EXCEL → SUPABASE CORRECTO
+        # Mapeo EXCEL → SUPABASE
         # -------------------------------
         mapeo = {
             "po": "po_number",
@@ -40,8 +40,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "product": "product",
             "qty_po": "boxes",
             "confirmed": "confirmed",
-            "b_t": "b_t",                     # <-- CORREGIDO
-            "total_u": "total_units",         # <-- CORREGIDO
+            "b_t": "box_type",              # <-- CORRECTO
+            "total_u": "total_units",       # <-- CORRECTO
             "cost": "cost",
             "customer": "customer_name",
             "origin": "origin",
@@ -53,21 +53,17 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         df.rename(columns=mapeo, inplace=True)
 
-        # --------------------------------------------------------------
-        # CONVERSIÓN DEFINITIVA PARA EVITAR EL ERROR "1.0", "<NA>", "nan"
-        # --------------------------------------------------------------
+        # -------------------------------
+        # FIX: convertir enteros seguro
+        # -------------------------------
         cols_int = ["boxes", "confirmed", "total_units"]
 
         def convertir_entero_seguro(x):
-            """Convierte cualquier cosa numérica a int, y basura → None."""
             if pd.isna(x):
                 return None
-
             x_str = str(x).strip().lower()
-
             if x_str in ["", "nan", "none", "<na>", "na"]:
                 return None
-
             try:
                 return int(float(x))
             except:
@@ -77,8 +73,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if col in df.columns:
                 df[col] = df[col].apply(convertir_entero_seguro)
 
-        # --------------------------------------------------------------
-
+        # -------------------------------
+        # Filtrar solo columnas válidas
+        # -------------------------------
         columnas_validas = list(mapeo.values())
         df = df[[c for c in df.columns if c in columnas_validas]]
 
