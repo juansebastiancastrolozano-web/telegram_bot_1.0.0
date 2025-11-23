@@ -1,54 +1,55 @@
 import pandas as pd
-import numpy as np
-import os
 
-def detectar_header(df):
-    mejor_idx = 0
-    mejor_score = -1
+def _normalizar_columna(nombre) -> str:
+    """
+    Convierte 'PO #' -> 'po', 'Ship Date' -> 'ship_date',
+    'Notes for the vendor' -> 'notes_for_the_vendor', etc.
+    """
+    if pd.isna(nombre):
+        return ""
 
-    for i, row in df.iterrows():
-        # Conteo de celdas no vacías como heurística
-        score = row.count()
+    s = str(nombre).strip()
 
-        # También damos puntos si hay strings presentes (muy típico de headers)
-        score += sum(row.apply(lambda x: isinstance(x, str)))
+    # Quitar símbolos molestos
+    for ch in ["#", "/", "-", "."]:
+        s = s.replace(ch, " ")
 
-        if score > mejor_score:
-            mejor_score = score
-            mejor_idx = i
-
-    return mejor_idx
+    # Colapsar espacios y pasar a snake_case
+    s = "_".join(s.split())
+    return s.lower()
 
 
-def cargar_tabla(path):
-    ext = os.path.splitext(path)[1].lower()
+def cargar_tabla(ruta: str) -> pd.DataFrame:
+    # Leemos SIN encabezado, porque el header real está más abajo
+    raw = pd.read_excel(ruta, header=None)
 
-    if ext in ['.xlsx', '.xls']:
-        df_raw = pd.read_excel(path, header=None)
-    elif ext in ['.csv']:
-        df_raw = pd.read_csv(path, header=None)
-    else:
-        raise Exception(f"No sé leer este tipo de archivo: {ext}")
+    header_row_idx = None
 
-    # Detectar encabezado real
-    header = detectar_header(df_raw)
+    # Buscamos la fila donde esté "PO #" (o variantes) para usarla como encabezado
+    for idx, row in raw.iterrows():
+        valores = [str(v).strip().lower() for v in row.tolist() if not pd.isna(v)]
+        if any(v in ("po #", "po#", "po") for v in valores):
+            header_row_idx = idx
+            break
 
-    df = None
-    if ext in ["xlsx", ".xls"]:
-        df = pd.read_excel(path, header=header)
-    else:
-        df = pd.read_csv(path, header=header)
+    if header_row_idx is None:
+        # Fallback: primera fila no vacía
+        for idx, row in raw.iterrows():
+            if not row.isna().all():
+                header_row_idx = idx
+                break
 
-    # Quitar filas o columnas completamente vacías
-    df = df.dropna(how="all")
-    df = df.dropna(axis=1, how="all")
+    # Fila de encabezado real
+    header_row = raw.iloc[header_row_idx]
 
-    # Normalizar nombres de columnas
-    df.columns = (
-        df.columns.astype(str)
-        .str.strip()
-        .str.lower()
-        .str.replace(r"[^a-z0-9]+", "_", regex=True)
-    )
+    # Datos empiezan en la fila siguiente
+    data = raw.iloc[header_row_idx + 1 :].copy()
 
-    return df
+    # Asignar nombres normalizados
+    data.columns = [_normalizar_columna(c) for c in header_row]
+
+    # Eliminar filas totalmente vacías
+    data = data.dropna(how="all").reset_index(drop=True)
+
+    return data
+

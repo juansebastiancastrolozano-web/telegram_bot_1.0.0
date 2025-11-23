@@ -31,6 +31,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # -------------------------------
+        # Mapeo EXCEL → SUPABASE
+        # -------------------------------
         mapeo = {
             "po": "po_number",
             "vendor": "vendor",
@@ -52,33 +54,33 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         df.rename(columns=mapeo, inplace=True)
 
         # -------------------------------
-        # FIX NUMÉRICO
+        # Conversión segura a INTEGER
         # -------------------------------
         cols_int = ["boxes", "confirmed", "total_units"]
 
-        def conv(x):
-            if pd.isna(x): return None
-            s = str(x).strip().lower()
-            if s in ["", "nan", "none", "<na>", "na"]: return None
-            try: return int(float(x))
-            except: return None
+        def convertir_entero_seguro(x):
+            if pd.isna(x):
+                return None
+            x_str = str(x).strip().lower()
+            if x_str in ["", "nan", "none", "<na>", "na"]:
+                return None
+            try:
+                return int(float(x))
+            except:
+                return None
 
         for col in cols_int:
             if col in df.columns:
-                df[col] = df[col].apply(conv)
+                df[col] = df[col].apply(convertir_entero_seguro)
 
         # -------------------------------
-        # CORTAMOS TODO LO QUE NO EXISTA:
+        # Quedarnos SOLO con columnas válidas
         # -------------------------------
-
         columnas_validas = list(mapeo.values())
+        columnas_presentes = [c for c in columnas_validas if c in df.columns]
+        df = df[columnas_presentes].copy()
 
-        # Mantener solo columnas válidas
-        df = df[columnas_validas].copy()
-
-        # ----------------------------------
-        # FILTRAR FILAS VACÍAS
-        # ----------------------------------
+        # Eliminar filas totalmente vacías (por si acaso)
         df.dropna(how="all", inplace=True)
 
         resultado = insertar_dataframe(
