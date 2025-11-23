@@ -30,7 +30,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Primero selecciona tabla con /tabla confirm_po")
             return
 
+        # ============================================================
         # Mapeo EXCEL → SUPABASE
+        # ============================================================
         mapeo = {
             "po": "po_number",
             "vendor": "vendor",
@@ -49,23 +51,53 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "notes_for_the_vendor": "notes"
         }
 
-        # Renombrar columnas
         df.rename(columns=mapeo, inplace=True)
 
-        # ---- Conversión segura a enteros ----
+        # ============================================================
+        # CONVERSIÓN BLINDADA PARA ENTEROS (Boxes, Confirmed, Total U)
+        # Evita errores tipo "<NA>", "nan", "", "1.0", etc.
+        # ============================================================
         cols_int = ["boxes", "confirmed", "total_units"]
+
+        def clean_int(value):
+            if pd.isna(value):
+                return None
+
+            s = str(value).strip().lower()
+            if s in ["", "none", "nan", "<na>", "na"]:
+                return None
+
+            try:
+                return int(float(s))
+            except:
+                return None
 
         for col in cols_int:
             if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-                df[col] = df[col].astype("Int64")
-                df[col] = df[col].where(df[col].notnull(), None)
+                df[col] = df[col].apply(clean_int)
 
+        # ============================================================
+        # Limpiar costo → siempre string decimal sin símbolos
+        # ============================================================
+        if "cost" in df.columns:
+            df["cost"] = (
+                df["cost"]
+                .astype(str)
+                .str.replace("$", "", regex=False)
+                .str.replace(",", "", regex=False)
+                .str.strip()
+            )
+            df["cost"] = df["cost"].replace(["nan", "<na>", "None", ""], None)
+
+        # ============================================================
         # Filtrar solo columnas válidas para Supabase
+        # ============================================================
         columnas_validas = list(mapeo.values())
         df = df[[c for c in df.columns if c in columnas_validas]]
 
-        # UPSERT con clave compuesta
+        # ============================================================
+        # UPSERT basado en clave compuesta
+        # ============================================================
         resultado = insertar_dataframe(
             tabla_destino,
             df,
