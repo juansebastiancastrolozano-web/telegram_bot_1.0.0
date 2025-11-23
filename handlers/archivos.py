@@ -1,6 +1,5 @@
 import os
 import pandas as pd
-import numpy as np
 from telegram import Update
 from telegram.ext import ContextTypes
 
@@ -11,7 +10,9 @@ from services.supabase_insert import insertar_dataframe
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 1) Descargar archivo enviado por el usuario
     archivo = update.message.document
     tg_file = await context.bot.get_file(archivo.file_id)
 
@@ -21,18 +22,21 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Procesando {archivo.file_name}…")
 
     try:
+        # 2) Cargar tabla con el lector universal (detecta encabezado, etc.)
         df = cargar_tabla(ruta)
 
+        # 3) Saber a qué tabla de Supabase va este archivo
         user_id = update.message.from_user.id
         tabla_destino = user_tablas.get(user_id)
 
         if not tabla_destino:
-            await update.message.reply_text("Primero selecciona tabla con /tabla confirm_po")
+            await update.message.reply_text(
+                "Primero selecciona la tabla destino, por ejemplo:\n"
+                "/tabla confirm_po"
+            )
             return
 
-        # -------------------------------
-        # Mapeo EXCEL → SUPABASE
-        # -------------------------------
+        # 4) Mapeo columnas ARCHIVO → columnas SUPABASE
         mapeo = {
             "po": "po_number",
             "vendor": "vendor",
@@ -48,49 +52,38 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "status": "status",
             "mark_code": "mark_code",
             "ship_country": "ship_country",
-            "notes_for_the_vendor": "notes"
+            "notes_for_the_vendor": "notes",
         }
 
+        # Renombrar columnas según mapeo (solo las que existan)
         df.rename(columns=mapeo, inplace=True)
 
-        # -------------------------------
-        # Conversión segura a INTEGER
-        # -------------------------------
-        cols_int = ["boxes", "confirmed", "total_units"]
+        # 5) FILTRO IMPORTANTE:
+        #    Nos quedamos solo con filas "de verdad":
+        #    las que tienen vendor (BM, etc.).
+        #    Así ignoramos todo el bloque de "Report Explanation".
+        if "vendor" in df.columns:
+            df = df[
+                df["vendor"].notna()
+                & (df["vendor"].astype(str).str.strip() != "")
+            ]
 
-        def convertir_entero_seguro(x):
-            if pd.isna(x):
-                return None
-            x_str = str(x).strip().lower()
-            if x_str in ["", "nan", "none", "<na>", "na"]:
-                return None
-            try:
-                return int(float(x))
-            except:
-                return None
-
-        for col in cols_int:
-            if col in df.columns:
-                df[col] = df[col].apply(convertir_entero_seguro)
-
-        # -------------------------------
-        # Quedarnos SOLO con columnas válidas
-        # -------------------------------
+        # 6) Limitar a las columnas que existen en Supabase
         columnas_validas = list(mapeo.values())
-        columnas_presentes = [c for c in columnas_validas if c in df.columns]
-        df = df[columnas_presentes].copy()
+        df = df[[c for c in df.columns if c in columnas_validas]]
 
-        # Eliminar filas totalmente vacías (por si acaso)
-        df.dropna(how="all", inplace=True)
-
+        # 7) Enviar a Supabase
+        #    Limpieza de tipos (enteros, fechas, floats) se hace dentro
+        #    de insertar_dataframe().
         resultado = insertar_dataframe(
             tabla_destino,
             df,
-            columna_unica="po_number,product,vendor"
+            columna_unica="po_number,product,vendor",
         )
 
         await update.message.reply_text(f"✔️ {resultado}")
 
     except Exception as e:
+        # Si algo explota, lo ves en Telegram
         await update.message.reply_text(f"❌ Error: {e}")
 
