@@ -1,67 +1,71 @@
-import os
-import pandas as pd
-import numpy as np
-from supabase import create_client, Client
+from supabase_client import supabase
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+# Columnas que DEBEN ser enteros por tabla
+INT_COLS_BY_TABLE = {
+    "confirm_po": ["boxes", "confirmed", "total_units"],
+    # aquí luego puedes añadir otras tablas
+}
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def convertir_fechas(df):
-    for col in df.columns:
-        if pd.api.types.is_datetime64_any_dtype(df[col]):
-            df[col] = df[col].dt.strftime("%Y-%m-%d")
-    return df
+def _sanear_enteros_en_fila(fila: dict, columnas: list[str]) -> None:
+    """
+    Convierte cualquier cosa rara ("1.0", 1.0, " 2 ", "<NA>", "nan") a int o None.
+    Modifica la fila en sitio.
+    """
+    for col in columnas:
+        if col not in fila:
+            continue
 
-def limpiar_valores_invalidos(df):
-    # Reemplazar NaN, inf, -inf por None
-    df = df.replace([np.inf, -np.inf], np.nan)
-    df = df.where(pd.notnull(df), None)
+        valor = fila[col]
 
-    # Convertir números demasiado grandes o raros a strings
-    for col in df.columns:
-        for i, val in enumerate(df[col]):
-            if isinstance(val, float):
-                if val is None:
-                    continue
-                # JSON no permite floats fuera de rango
-                if np.isinf(val) or np.isnan(val):
-                    df.at[i, col] = None
-                # Si el valor es demasiado grande para JSON
-                elif abs(val) > 1e308:
-                    df.at[i, col] = str(val)
-            elif isinstance(val, pd.Timestamp):
-                df.at[i, col] = val.strftime("%Y-%m-%d")
-    return df
+        if valor is None:
+            continue
 
-def insertar_dataframe(tabla, df, columna_unica=None):
-    # Convertir todo a string seguro
-    df = df.astype(str)
+        s = str(valor).strip().lower()
 
-    # Limpiar valores prohibidos JSON
-    df = df.replace({
-        "nan": None,
-        "NaN": None,
-        "None": None,
-        "NaT": None,
-        "inf": None,
-        "-inf": None,
-        "": None
-    })
+        if s in ("", "nan", "none", "<na>", "na"):
+            fila[col] = None
+            continue
 
-    datos = df.to_dict(orient="records")
+        try:
+            fila[col] = int(float(s))
+        except Exception:
+            # Si no se puede convertir, mejor guardarlo como NULL
+            fila[col] = None
+
+
+def insertar_dataframe(nombre_tabla: str, df, columna_unica: str | None = None) -> str:
+    """
+    Inserta / upsertea un DataFrame en Supabase, saneando enteros para evitar
+    el famoso 'invalid input syntax for type integer: "1.0"'.
+    """
+
+    # DataFrame -> lista de dicts
+    filas = df.to_dict(orient="records")
+
+    if not filas:
+        return f"0 filas (nada que insertar) en {nombre_tabla}"
+
+    # Saneamos enteros por tabla
+    int_cols = INT_COLS_BY_TABLE.get(nombre_tabla, [])
+
+    for fila in filas:
+        _sanear_enteros_en_fila(fila, int_cols)
+
+    # Llamada a Supabase
+    query = supabase.table(nombre_tabla)
 
     if columna_unica:
-        res = supabase.table(tabla).upsert(
-            datos,
-            on_conflict=columna_unica
-        ).execute()
+        respuesta = query.upsert(filas, on_conflict=columna_unica).execute()
     else:
-        res = supabase.table(tabla).insert(datos).execute()
+        respuesta = query.insert(filas).execute()
 
-    if res.error:
-        raise Exception(res.error)
+    # Manejo de errores del cliente de Supabase
+    error = getattr(respuesta, "error", None)
+    if error:
+        # Lo lanzamos para que el handler lo capture y te lo muestre
+        raise Exception(error)
 
-    return f"{len(datos)} filas insertadas/upserteadas en {tabla}."
+    data = getattr(respuesta, "data", None) or []
+    return f"{len(data)} filas procesadas en {nombre_tabla}"
 
