@@ -52,16 +52,18 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Renombrar columnas
         df.rename(columns=mapeo, inplace=True)
 
-        # ----------------------------------------------------------------------
-        # Conversión segura de columnas numéricas a enteros con soporte para NaN
-        # ----------------------------------------------------------------------
-        cols_int = ["boxes", "confirmed", "total_units"]
+       # ----------------------------------------------------------------------
+       # Conversión segura de columnas numéricas a enteros con soporte para NaN
+       # ----------------------------------------------------------------------
+       cols_int = ["boxes", "confirmed", "total_units"]
 
-        for col in cols_int:
+       for col in cols_int:
             if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-                df[col] = df[col].astype("Int64")
-        # ----------------------------------------------------------------------
+              df[col] = pd.to_numeric(df[col], errors="coerce")  # "1.0" -> 1.0, basura -> NaN
+              df[col] = df[col].astype("Int64")                  # 1.0 -> 1, NaN -> <NA>
+              df[col] = df[col].where(df[col].notnull(), None)   # <NA> -> None (PostgreSQL safe)
+       # ----------------------------------------------------------------------
+
 
         # Filtrar solo las columnas válidas para Supabase
         columnas_validas = list(mapeo.values())
