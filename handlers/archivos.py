@@ -30,9 +30,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Primero selecciona tabla con /tabla confirm_po")
             return
 
-        # ============================================================
-        # Mapeo EXCEL → SUPABASE
-        # ============================================================
+        # -------------------------------
+        # Mapeo EXCEL → SUPABASE CORRECTO
+        # -------------------------------
         mapeo = {
             "po": "po_number",
             "vendor": "vendor",
@@ -40,8 +40,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "product": "product",
             "qty_po": "boxes",
             "confirmed": "confirmed",
-            "b_t": "box_type",
-            "total_u": "total_units",
+            "b_t": "b_t",                     # <-- CORREGIDO
+            "total_u": "total_units",         # <-- CORREGIDO
             "cost": "cost",
             "customer": "customer_name",
             "origin": "origin",
@@ -53,51 +53,35 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         df.rename(columns=mapeo, inplace=True)
 
-        # ============================================================
-        # CONVERSIÓN BLINDADA PARA ENTEROS (Boxes, Confirmed, Total U)
-        # Evita errores tipo "<NA>", "nan", "", "1.0", etc.
-        # ============================================================
+        # --------------------------------------------------------------
+        # CONVERSIÓN DEFINITIVA PARA EVITAR EL ERROR "1.0", "<NA>", "nan"
+        # --------------------------------------------------------------
         cols_int = ["boxes", "confirmed", "total_units"]
 
-        def clean_int(value):
-            if pd.isna(value):
+        def convertir_entero_seguro(x):
+            """Convierte cualquier cosa numérica a int, y basura → None."""
+            if pd.isna(x):
                 return None
 
-            s = str(value).strip().lower()
-            if s in ["", "none", "nan", "<na>", "na"]:
+            x_str = str(x).strip().lower()
+
+            if x_str in ["", "nan", "none", "<na>", "na"]:
                 return None
 
             try:
-                return int(float(s))
+                return int(float(x))
             except:
                 return None
 
         for col in cols_int:
             if col in df.columns:
-                df[col] = df[col].apply(clean_int)
+                df[col] = df[col].apply(convertir_entero_seguro)
 
-        # ============================================================
-        # Limpiar costo → siempre string decimal sin símbolos
-        # ============================================================
-        if "cost" in df.columns:
-            df["cost"] = (
-                df["cost"]
-                .astype(str)
-                .str.replace("$", "", regex=False)
-                .str.replace(",", "", regex=False)
-                .str.strip()
-            )
-            df["cost"] = df["cost"].replace(["nan", "<na>", "None", ""], None)
+        # --------------------------------------------------------------
 
-        # ============================================================
-        # Filtrar solo columnas válidas para Supabase
-        # ============================================================
         columnas_validas = list(mapeo.values())
         df = df[[c for c in df.columns if c in columnas_validas]]
 
-        # ============================================================
-        # UPSERT basado en clave compuesta
-        # ============================================================
         resultado = insertar_dataframe(
             tabla_destino,
             df,
