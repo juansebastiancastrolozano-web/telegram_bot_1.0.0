@@ -52,24 +52,20 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Renombrar columnas
         df.rename(columns=mapeo, inplace=True)
 
-       # ----------------------------------------------------------------------
-       # Conversión segura de columnas numéricas a enteros con soporte para NaN
-       # ----------------------------------------------------------------------
-       cols_int = ["boxes", "confirmed", "total_units"]
+        # ---- Conversión segura a enteros ----
+        cols_int = ["boxes", "confirmed", "total_units"]
 
-       for col in cols_int:
+        for col in cols_int:
             if col in df.columns:
-              df[col] = pd.to_numeric(df[col], errors="coerce")  # "1.0" -> 1.0, basura -> NaN
-              df[col] = df[col].astype("Int64")                  # 1.0 -> 1, NaN -> <NA>
-              df[col] = df[col].where(df[col].notnull(), None)   # <NA> -> None (PostgreSQL safe)
-       # ----------------------------------------------------------------------
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+                df[col] = df[col].astype("Int64")
+                df[col] = df[col].where(df[col].notnull(), None)
 
-
-        # Filtrar solo las columnas válidas para Supabase
+        # Filtrar solo columnas válidas para Supabase
         columnas_validas = list(mapeo.values())
         df = df[[c for c in df.columns if c in columnas_validas]]
 
-        # Inserción con UPSERT basado en tu UNIQUE compuesto
+        # UPSERT con clave compuesta
         resultado = insertar_dataframe(
             tabla_destino,
             df,
