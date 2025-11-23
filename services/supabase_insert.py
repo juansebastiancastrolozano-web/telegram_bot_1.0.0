@@ -1,6 +1,7 @@
 import os
 from typing import List, Optional
 import datetime as dt
+import math
 
 import pandas as pd
 from supabase import create_client, Client
@@ -69,17 +70,13 @@ def _sanear_fechas_en_fila(fila: dict, columnas: List[str]) -> None:
 
         valor = fila[col]
 
-        # Null explícito
         if valor is None:
             continue
 
-        # NaN de pandas
-        try:
-            if isinstance(valor, float) and pd.isna(valor):
-                fila[col] = None
-                continue
-        except Exception:
-            pass
+        # NaN de pandas en float
+        if isinstance(valor, float) and math.isnan(valor):
+            fila[col] = None
+            continue
 
         # Tipos fecha directos
         if isinstance(valor, (pd.Timestamp, dt.datetime, dt.date)):
@@ -102,6 +99,24 @@ def _sanear_fechas_en_fila(fila: dict, columnas: List[str]) -> None:
             fila[col] = None
 
 
+def _sanear_floats_genericos(fila: dict) -> None:
+    """
+    Recorre TODOS los valores y si encuentra NaN / ±inf en floats,
+    los convierte en None para que el JSON sea estándar.
+    """
+    for k, v in list(fila.items()):
+        if isinstance(v, float):
+            if math.isnan(v) or math.isinf(v):
+                fila[k] = None
+        # pd.NA / NaN de pandas en otros tipos
+        try:
+            if pd.isna(v):
+                fila[k] = None
+        except Exception:
+            # si no soporta pd.isna, lo dejamos tal cual
+            pass
+
+
 # -------------------------------------------------------------------
 # Inserción / UPSERT
 # -------------------------------------------------------------------
@@ -111,10 +126,11 @@ def insertar_dataframe(
     columna_unica: Optional[str] = None,
 ) -> str:
     """
-    Inserta / upsertea un DataFrame en Supabase, saneando enteros y fechas
-    para evitar errores del tipo:
+    Inserta / upsertea un DataFrame en Supabase, saneando enteros, fechas
+    y floats raros para evitar errores como:
       - invalid input syntax for type integer: "1.0"
       - Object of type datetime is not JSON serializable
+      - Out of range float values are not JSON compliant
     """
 
     filas = df.to_dict(orient="records")
@@ -128,6 +144,7 @@ def insertar_dataframe(
     for fila in filas:
         _sanear_enteros_en_fila(fila, int_cols)
         _sanear_fechas_en_fila(fila, date_cols)
+        _sanear_floats_genericos(fila)
 
     query = supabase.table(nombre_tabla)
 
