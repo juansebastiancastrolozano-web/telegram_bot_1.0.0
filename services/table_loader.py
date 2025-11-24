@@ -3,9 +3,13 @@ import pandas as pd
 
 def _normalizar_columna(nombre) -> str:
     """
-    Convierte 'PO #' -> 'po', 'Ship Date' -> 'ship_date',
-    'Notes for the vendor' -> 'notes_for_the_vendor', etc.
-    (Solo lo usamos para Excels tipo Confirm POs.)
+    Convierte encabezados humanos a snake_case minúscula.
+
+    Ejemplos:
+      "PO #"                 -> "po"
+      "Ship Date"            -> "ship_date"
+      "Notes for the vendor" -> "notes_for_the_vendor"
+      "CIUDAD"               -> "ciudad"
     """
     if pd.isna(nombre):
         return ""
@@ -46,6 +50,10 @@ def _cargar_excel_con_encabezado_profundo(ruta: str) -> pd.DataFrame:
                 header_row_idx = idx
                 break
 
+    if header_row_idx is None:
+        # Nada útil en el archivo
+        return pd.DataFrame()
+
     # Fila de encabezado real
     header_row = raw.iloc[header_row_idx]
 
@@ -64,7 +72,7 @@ def _cargar_excel_con_encabezado_profundo(ruta: str) -> pd.DataFrame:
 def cargar_tabla(ruta: str) -> pd.DataFrame:
     """
     Lector universal:
-    - Si es CSV → pd.read_csv normal, respetando encabezados tal cual.
+    - Si es CSV → pd.read_csv y normalizamos encabezados con _normalizar_columna.
     - Si es XLS/XLSX → usamos el detector de encabezado profundo.
     """
     ruta_lower = ruta.lower()
@@ -73,9 +81,8 @@ def cargar_tabla(ruta: str) -> pd.DataFrame:
     if ruta_lower.endswith(".csv"):
         df = pd.read_csv(ruta)
 
-        # Limpiamos espacios en blanco en los nombres de columnas,
-        # pero NO los cambiamos de formato.
-        df.columns = [str(c).strip() for c in df.columns]
+        # Normalizar nombres de columnas igual que en Excel
+        df.columns = [_normalizar_columna(c) for c in df.columns]
 
         # Quitamos filas totalmente vacías
         df = df.dropna(how="all").reset_index(drop=True)
