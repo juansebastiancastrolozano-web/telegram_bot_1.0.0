@@ -122,7 +122,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             clave_unica = None
             if tabla_destino == "proveedores" and "codigo" in df.columns:
-                clave_unica = "codigo"
+                clave_unica = "codigo,,proveedor,gerente"
                 df = df.drop_duplicates(subset=["codigo"], keep="last")
             elif tabla_destino == "airlines" and "cod" in df.columns:
                 clave_unica = "cod"
