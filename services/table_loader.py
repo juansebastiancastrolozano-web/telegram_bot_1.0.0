@@ -1,9 +1,11 @@
 import pandas as pd
 
+
 def _normalizar_columna(nombre) -> str:
     """
     Convierte 'PO #' -> 'po', 'Ship Date' -> 'ship_date',
     'Notes for the vendor' -> 'notes_for_the_vendor', etc.
+    (Solo lo usamos para Excels tipo Confirm POs.)
     """
     if pd.isna(nombre):
         return ""
@@ -19,13 +21,18 @@ def _normalizar_columna(nombre) -> str:
     return s.lower()
 
 
-def cargar_tabla(ruta: str) -> pd.DataFrame:
+def _cargar_excel_con_encabezado_profundo(ruta: str) -> pd.DataFrame:
+    """
+    Caso Confirm POs.xls:
+    - El header real no está en la fila 0.
+    - Buscamos la fila donde aparezca 'PO #' (o similar) y la usamos como encabezado.
+    """
     # Leemos SIN encabezado, porque el header real está más abajo
     raw = pd.read_excel(ruta, header=None)
 
     header_row_idx = None
 
-    # Buscamos la fila donde esté "PO #" (o variantes) para usarla como encabezado
+    # Buscamos la fila donde esté algo tipo "PO #"
     for idx, row in raw.iterrows():
         valores = [str(v).strip().lower() for v in row.tolist() if not pd.isna(v)]
         if any(v in ("po #", "po#", "po") for v in valores):
@@ -52,4 +59,32 @@ def cargar_tabla(ruta: str) -> pd.DataFrame:
     data = data.dropna(how="all").reset_index(drop=True)
 
     return data
+
+
+def cargar_tabla(ruta: str) -> pd.DataFrame:
+    """
+    Lector universal:
+    - Si es CSV → pd.read_csv normal, respetando encabezados tal cual.
+    - Si es XLS/XLSX → usamos el detector de encabezado profundo.
+    """
+    ruta_lower = ruta.lower()
+
+    # --------- CASO CSV (proveedores, etc.) ---------
+    if ruta_lower.endswith(".csv"):
+        df = pd.read_csv(ruta)
+
+        # Limpiamos espacios en blanco en los nombres de columnas,
+        # pero NO los cambiamos de formato.
+        df.columns = [str(c).strip() for c in df.columns]
+
+        # Quitamos filas totalmente vacías
+        df = df.dropna(how="all").reset_index(drop=True)
+        return df
+
+    # --------- CASO EXCEL (Confirm POs, etc.) ---------
+    if ruta_lower.endswith(".xls") or ruta_lower.endswith(".xlsx"):
+        return _cargar_excel_con_encabezado_profundo(ruta)
+
+    # --------- FORMATO DESCONOCIDO ---------
+    raise ValueError(f"No sé cómo leer este archivo: {ruta}")
 
