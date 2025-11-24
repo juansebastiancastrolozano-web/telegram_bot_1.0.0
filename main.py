@@ -66,7 +66,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("help", handle_help))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
     app.add_handler(CommandHandler("tabla", set_tabla))
-    application.add_handler(CommandHandler("tablageneral", tablageneral))
+    app.add_handler(CommandHandler("tablageneral", tablageneral))
    
    
     print("🤖 Bot iniciado... esperando mensajes.")
