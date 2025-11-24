@@ -9,3 +9,5 @@ xlrd
 supabase
 
 numpy
+psycopg2-binary
+tabulate
