@@ -11,17 +11,9 @@ from services.table_detector import obtener_columnas_tabla
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-
 def _norm_generico(nombre: str) -> str:
-    """
-    Normalización suave para comparar nombres de columnas:
-    - quita espacios extremos
-    - pasa a minúsculas
-    - convierte espacios internos en '_'
-    """
     s = str(nombre).strip().lower()
-    s = s.replace(" ", "_")
-    return s
+    return s.replace(" ", "_")
 
 
 def _convertir_entero_seguro(x):
@@ -50,16 +42,13 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tabla_destino = user_tablas.get(user_id)
 
         if not tabla_destino:
-            await update.message.reply_text(
-                "Primero selecciona una tabla con /tabla nombre_tabla"
-            )
+            await update.message.reply_text("Primero selecciona una tabla con /tabla …")
             return
 
-        # 1) Leemos el archivo con el loader genérico
         df = cargar_tabla(ruta)
 
         # ============================================================
-        # CASO ESPECIAL: confirm_po (Excel con estructura rara)
+        # CONFIRM PO
         # ============================================================
         if tabla_destino == "confirm_po":
             mapeo = {
@@ -80,33 +69,25 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "notes_for_the_vendor": "notes",
             }
 
-            # Renombrar columnas del Excel al nombre real de Supabase
             df.rename(columns=mapeo, inplace=True)
 
-            # Convertimos enteros con cariño y sin explotar
-            cols_int = ["boxes", "confirmed", "total_units"]
-            for col in cols_int:
+            for col in ("boxes", "confirmed", "total_units"):
                 if col in df.columns:
                     df[col] = df[col].apply(_convertir_entero_seguro)
 
-            # Filtrar BASURA: solo filas con vendor, product y ship_date.
-            # Las filas de "Report Explanation", "PO #: PO Number", etc, NO tienen eso.
-            for col_obligatoria in ("vendor", "product", "ship_date"):
-                if col_obligatoria in df.columns:
-                    df = df[df[col_obligatoria].notna()]
+            # Filtrar ruido del Excel
+            for col in ("vendor", "product", "ship_date"):
+                if col in df.columns:
+                    df = df[df[col].notna()]
 
-            # Reducimos a las columnas que realmente existen en la tabla
             columnas_validas = list(mapeo.values())
             df = df[[c for c in df.columns if c in columnas_validas]]
 
-            # Fuera filas totalmente vacías
             df = df.dropna(how="all").reset_index(drop=True)
 
-            # Evitar duplicados dentro del propio archivo
-            if {"po_number", "product", "vendor"}.issubset(df.columns):
-                df = df.drop_duplicates(
-                    subset=["po_number", "product", "vendor"], keep="last"
-                )
+            df = df.drop_duplicates(
+                subset=["po_number", "product", "vendor"], keep="last"
+            )
 
             resultado = insertar_dataframe(
                 tabla_destino,
@@ -115,20 +96,13 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         # ============================================================
-        # CASO GENERAL: proveedores, airlines, etc.
+        # GENERAL (proveedores, airlines, etc.)
         # ============================================================
         else:
-            # 1) Esquema real de la tabla en Supabase
             esquema = obtener_columnas_tabla(tabla_destino)
-            #   esquema = [ {"nombre": "...", ...}, ... ]
 
-            # Mapa: nombre_normalizado_en_db -> nombre_real_en_db
-            mapa_db = {
-                _norm_generico(col["nombre"]): col["nombre"]
-                for col in esquema
-            }
+            mapa_db = {_norm_generico(col["nombre"]): col["nombre"] for col in esquema}
 
-            # 2) Normalizamos nombres del archivo (solo espacios y minúsculas)
             df.columns = [str(c).strip() for c in df.columns]
 
             columnas_originales = []
@@ -139,19 +113,14 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if key in mapa_db:
                     columnas_originales.append(c)
                     renombrar[c] = mapa_db[key]
-                # si NO está en mapa_db => se ignora, justo lo que querías
 
-            # Si ninguna columna coincide, df quedará vacío
             if columnas_originales:
-                df = df[columnas_originales]
-                df = df.rename(columns=renombrar)
+                df = df[columnas_originales].rename(columns=renombrar)
             else:
                 df = df.iloc[0:0]
 
-            # Quitamos filas 100% vacías
             df = df.dropna(how="all").reset_index(drop=True)
 
-            # Clave única y deduplicación por tabla
             clave_unica = None
             if tabla_destino == "proveedores" and "codigo" in df.columns:
                 clave_unica = "codigo"
@@ -170,4 +139,3 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
-

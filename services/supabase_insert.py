@@ -159,4 +159,3 @@ def insertar_dataframe(
 
     data = getattr(resp, "data", None) or []
     return f"{len(data)} filas procesadas en {nombre_tabla}"
-
