@@ -1,45 +1,10 @@
 from functools import lru_cache
 
-from supabase_client import supabase
-
-
-# Columnas conocidas "a mano" para tablas importantes.
-# Aquí solo metemos lo que realmente necesitamos controlar.
-COLUMNAS_FIJAS = {
-    "confirm_po": {
-        "id",
-        "po_number",
-        "vendor",
-        "ship_date",
-        "product",
-        "boxes",
-        "confirmed",
-        "box_type",
-        "total_units",
-        "cost",
-        "customer_name",
-        "origin",
-        "status",
-        "mark_code",
-        "ship_country",
-        "notes",
-        "created_at",
-        "updated_at",
-        "import_batch_id",
-        "source_file",
-        "b_t",
-        "total_u",
-    },
-    # Cuando quieras puedes añadir más tablas:
-    # "proveedores": {"id", "cod", "aerolinea", "ciudad", ...},
-    # "airlines": {"id", "cod", "aerolinea", ...},
-}
-
 
 def detectar_tabla(df):
     """
-    Versión simple que intenta adivinar la tabla por las columnas presentes.
-    La puedes seguir usando si te sirve para debugging, pero ya no es crítica.
+    Versión simple para adivinar tabla a partir de columnas.
+    No es crítica para el flujo actual, pero la dejamos por si la usas.
     """
     columnas = set(df.columns)
 
@@ -47,8 +12,9 @@ def detectar_tabla(df):
         "price_list": {"price", "variety", "stem", "color"},
         "customers": {"customer", "country", "email"},
         "farms": {"farm", "location", "code"},
-        # Ajustado a tu esquema real de confirm_po
         "confirm_po": {"po_number", "product", "boxes"},
+        "proveedores": {"codigo", "proveedor"},
+        "airlines": {"cod", "aerolinea"},
     }
 
     for tabla, columnas_esperadas in reglas.items():
@@ -58,43 +24,78 @@ def detectar_tabla(df):
     return None
 
 
+# Mapa estático de columnas por tabla.
+# Importante: los nombres aquí deben ser EXACTAMENTE los de Supabase.
+COLUMNAS_TABLAS = {
+    # Esta realmente no la usamos en el handler (porque confirm_po
+    # tiene su mapeo especial), pero la dejo coherente igual.
+    "confirm_po": [
+        {"nombre": "po_number"},
+        {"nombre": "vendor"},
+        {"nombre": "ship_date"},
+        {"nombre": "product"},
+        {"nombre": "boxes"},
+        {"nombre": "confirmed"},
+        {"nombre": "box_type"},
+        {"nombre": "total_units"},
+        {"nombre": "cost"},
+        {"nombre": "customer_name"},
+        {"nombre": "origin"},
+        {"nombre": "status"},
+        {"nombre": "mark_code"},
+        {"nombre": "ship_country"},
+        {"nombre": "notes"},
+        {"nombre": "import_batch_id"},
+        {"nombre": "source_file"},
+        {"nombre": "b_t"},
+        {"nombre": "total_u"},
+    ],
+
+    # Operacional - Proveedores.csv  (normalizado por tu table_loader)
+    # Columnas en el CSV -> 'codigo','proveedor','contacto', 'direccion',...
+    "proveedores": [
+        {"nombre": "codigo"},
+        {"nombre": "proveedor"},
+        {"nombre": "contacto"},
+        {"nombre": "direccion"},
+        {"nombre": "ciudad"},
+        {"nombre": "edo"},
+        {"nombre": "pais"},
+        {"nombre": "telefono"},
+        {"nombre": "nit"},
+        {"nombre": "predio_fito"},
+        {"nombre": "ng"},
+        {"nombre": "mes_trm"},
+        {"nombre": "dia_trm"},
+        {"nombre": "gerente"},
+        {"nombre": "correo"},
+        {"nombre": "cod1q"},
+        {"nombre": "correo_po"},
+    ],
+
+    # Operacional - AEROLINEAS.csv (después de limpiarlo)
+    # El header real es: COD, AEROLINEA, ..., num, dia
+    # y tu loader las normaliza a: cod, aerolinea, num, dia
+    "airlines": [
+        {"nombre": "cod"},
+        {"nombre": "aerolinea"},
+        {"nombre": "num"},
+        {"nombre": "dia"},
+    ],
+}
+
+
 @lru_cache(maxsize=32)
-def obtener_columnas_tabla(nombre_tabla: str) -> set[str]:
+def obtener_columnas_tabla(nombre_tabla: str):
     """
-    Devuelve el set de columnas válidas para `nombre_tabla` en Supabase.
+    Devuelve una lista de dicts con clave 'nombre' para la tabla dada.
 
-    Orden de resolución:
-    1) Si la tabla está en COLUMNAS_FIJAS -> usamos eso.
-    2) Si no, hacemos SELECT * LIMIT 1 a Supabase y tomamos las keys del primer row.
-    3) Si no hay filas o algo peta, devolvemos set().
+    Esto es exactamente lo que tu handler espera:
 
-    Ojo: devolver set() NO debe romper nada siempre que en el handler hagas:
-        if columnas_validas:
-            df = df[[c for c in df.columns if c in columnas_validas]]
+        esquema = obtener_columnas_tabla(tabla_destino)
+        mapa_db = {
+            _norm_generico(col["nombre"]): col["nombre"]
+            for col in esquema
+        }
     """
-    if not nombre_tabla:
-        return set()
-
-    # 1) Diccionario fijo
-    if nombre_tabla in COLUMNAS_FIJAS:
-        return COLUMNAS_FIJAS[nombre_tabla]
-
-    # 2) Preguntar a Supabase
-    try:
-        resp = supabase.table(nombre_tabla).select("*").limit(1).execute()
-    except Exception:
-        # Si algo falla (tabla mal escrita, fallo de red, etc.) devolvemos set vacío.
-        return set()
-
-    # Compatibilidad con posibles formas de respuesta
-    data = getattr(resp, "data", None)
-    if data is None and isinstance(resp, dict):
-        data = resp.get("data")
-
-    if not data:
-        # Tabla sin filas: no podemos inferir columnas -> dejamos que el caller decida.
-        return set()
-
-    first_row = data[0]
-    return set(first_row.keys())
-
+    return COLUMNAS_TABLAS.get(nombre_tabla, [])
