@@ -75,7 +75,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if col in df.columns:
                     df[col] = df[col].apply(_convertir_entero_seguro)
 
-            # Filtrar ruido del Excel
             for col in ("vendor", "product", "ship_date"):
                 if col in df.columns:
                     df = df[df[col].notna()]
