@@ -1,46 +1,6 @@
 from functools import lru_cache
 
-def detectar_tabla(df):
-    columnas = set(df.columns)
-
-    reglas = {
-        "price_list": {"price", "variety", "stem", "color"},
-        "customers": {"customer", "country", "email"},
-        "farms": {"farm", "location", "code"},
-        "confirm_po": {"po_number", "product", "boxes"},
-        "proveedores": {"codigo", "proveedor"},
-        "airlines": {"cod", "aerolinea"},
-    }
-
-    for tabla, columnas_esperadas in reglas.items():
-        if columnas_esperadas.intersection(columnas):
-            return tabla
-
-    return None
-
-
 COLUMNAS_TABLAS = {
-    "confirm_po": [
-        {"nombre": "po_number"},
-        {"nombre": "vendor"},
-        {"nombre": "ship_date"},
-        {"nombre": "product"},
-        {"nombre": "boxes"},
-        {"nombre": "confirmed"},
-        {"nombre": "box_type"},
-        {"nombre": "total_units"},
-        {"nombre": "cost"},
-        {"nombre": "customer_name"},
-        {"nombre": "origin"},
-        {"nombre": "status"},
-        {"nombre": "mark_code"},
-        {"nombre": "ship_country"},
-        {"nombre": "notes"},
-        {"nombre": "import_batch_id"},
-        {"nombre": "source_file"},
-    ],
-
-    # ------- VERSIÓN ESTABLE DE PROVEEDORES -------
     "proveedores": [
         {"nombre": "codigo"},
         {"nombre": "proveedor"},
@@ -61,12 +21,36 @@ COLUMNAS_TABLAS = {
         {"nombre": "correo_po"},
     ],
 
-    # ------- Airlines SOLO con las columnas reales -------
     "airlines": [
         {"nombre": "cod"},
         {"nombre": "aerolinea"},
+        {"nombre": "num"},
+        {"nombre": "dia"},
     ],
+
+    "confirm_po": [
+        {"nombre": "po_number"},
+        {"nombre": "vendor"},
+        {"nombre": "ship_date"},
+        {"nombre": "product"},
+        {"nombre": "boxes"},
+        {"nombre": "confirmed"},
+        {"nombre": "box_type"},
+        {"nombre": "total_units"},
+        {"nombre": "cost"},
+        {"nombre": "customer_name"},
+        {"nombre": "origin"},
+        {"nombre": "status"},
+        {"nombre": "mark_code"},
+        {"nombre": "ship_country"},
+        {"nombre": "notes"},
+        {"nombre": "import_batch_id"},
+        {"nombre": "source_file"},
+        {"nombre": "b_t"},
+        {"nombre": "total_u"},
+    ]
 }
+
 
 @lru_cache(maxsize=32)
 def obtener_columnas_tabla(nombre_tabla: str):
