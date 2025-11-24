@@ -3,13 +3,8 @@ import pandas as pd
 
 def _normalizar_columna(nombre) -> str:
     """
-    Convierte encabezados humanos a snake_case minúscula.
-
-    Ejemplos:
-      "PO #"                 -> "po"
-      "Ship Date"            -> "ship_date"
-      "Notes for the vendor" -> "notes_for_the_vendor"
-      "CIUDAD"               -> "ciudad"
+    Convierte 'PO #' -> 'po', 'Ship Date' -> 'ship_date',
+    'Notes for the vendor' -> 'notes_for_the_vendor', etc.
     """
     if pd.isna(nombre):
         return ""
@@ -50,10 +45,6 @@ def _cargar_excel_con_encabezado_profundo(ruta: str) -> pd.DataFrame:
                 header_row_idx = idx
                 break
 
-    if header_row_idx is None:
-        # Nada útil en el archivo
-        return pd.DataFrame()
-
     # Fila de encabezado real
     header_row = raw.iloc[header_row_idx]
 
@@ -69,29 +60,56 @@ def _cargar_excel_con_encabezado_profundo(ruta: str) -> pd.DataFrame:
     return data
 
 
+def _cargar_csv_con_encabezado_profundo(ruta: str) -> pd.DataFrame:
+    """
+    Versión "profunda" para CSV.
+
+    Nos sirve tanto para:
+    - CSV normales (header en la fila 0, p.ej. proveedores),
+    - Como para cosas tipo AEROLINEAS, donde el header real está varias filas más abajo.
+
+    Estrategia:
+    - Leemos con header=None.
+    - Buscamos la primera fila que tenga alguna de estas palabras clave en minúsculas:
+      'po', 'po #', 'codigo', 'cod', 'vendor', 'proveedor', 'aerolinea'.
+    - Esa fila se usa como encabezado.
+    """
+    raw = pd.read_csv(ruta, header=None)
+
+    header_row_idx = None
+    palabras_clave = {"po #", "po#", "po", "codigo", "cod", "vendor", "proveedor", "aerolinea"}
+
+    for idx, row in raw.iterrows():
+        valores = [str(v).strip().lower() for v in row.tolist() if not pd.isna(v)]
+        if any(v in palabras_clave for v in valores):
+            header_row_idx = idx
+            break
+
+    if header_row_idx is None:
+        # Si no encontramos nada "especial", asumimos fila 0 como encabezado normal.
+        header_row_idx = 0
+
+    header_row = raw.iloc[header_row_idx]
+    data = raw.iloc[header_row_idx + 1 :].copy()
+
+    data.columns = [_normalizar_columna(c) for c in header_row]
+    data = data.dropna(how="all").reset_index(drop=True)
+    return data
+
+
 def cargar_tabla(ruta: str) -> pd.DataFrame:
     """
     Lector universal:
-    - Si es CSV → pd.read_csv y normalizamos encabezados con _normalizar_columna.
-    - Si es XLS/XLSX → usamos el detector de encabezado profundo.
+    - Si es CSV  → _cargar_csv_con_encabezado_profundo
+    - Si es XLS* → _cargar_excel_con_encabezado_profundo
     """
     ruta_lower = ruta.lower()
 
-    # --------- CASO CSV (proveedores, etc.) ---------
     if ruta_lower.endswith(".csv"):
-        df = pd.read_csv(ruta)
+        return _cargar_csv_con_encabezado_profundo(ruta)
 
-        # Normalizar nombres de columnas igual que en Excel
-        df.columns = [_normalizar_columna(c) for c in df.columns]
-
-        # Quitamos filas totalmente vacías
-        df = df.dropna(how="all").reset_index(drop=True)
-        return df
-
-    # --------- CASO EXCEL (Confirm POs, etc.) ---------
     if ruta_lower.endswith(".xls") or ruta_lower.endswith(".xlsx"):
         return _cargar_excel_con_encabezado_profundo(ruta)
 
-    # --------- FORMATO DESCONOCIDO ---------
     raise ValueError(f"No sé cómo leer este archivo: {ruta}")
 

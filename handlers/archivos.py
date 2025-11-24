@@ -18,14 +18,22 @@ def _norm_generico(nombre: str) -> str:
     - quita espacios extremos
     - pasa a minúsculas
     - convierte espacios internos en '_'
-
-    Ej:
-    'Customer Name' -> 'customer_name'
-    'CIUDAD'        -> 'ciudad'
     """
     s = str(nombre).strip().lower()
     s = s.replace(" ", "_")
     return s
+
+
+def _convertir_entero_seguro(x):
+    if pd.isna(x):
+        return None
+    s = str(x).strip().lower()
+    if s in ("", "nan", "none", "<na>", "na"):
+        return None
+    try:
+        return int(float(s))
+    except Exception:
+        return None
 
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -38,9 +46,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Procesando {archivo.file_name}…")
 
     try:
-        # 1) Leemos el archivo (Excel raro o CSV, eso lo decide table_loader)
-        df = cargar_tabla(ruta)
-
         user_id = update.message.from_user.id
         tabla_destino = user_tablas.get(user_id)
 
@@ -50,8 +55,11 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        # 1) Leemos el archivo con el loader genérico
+        df = cargar_tabla(ruta)
+
         # ============================================================
-        # CASO ESPECIAL: confirm_po (Excel con nombres diferentes)
+        # CASO ESPECIAL: confirm_po (Excel con estructura rara)
         # ============================================================
         if tabla_destino == "confirm_po":
             mapeo = {
@@ -75,30 +83,30 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Renombrar columnas del Excel al nombre real de Supabase
             df.rename(columns=mapeo, inplace=True)
 
-            # Columnas que en Supabase son integer
+            # Convertimos enteros con cariño y sin explotar
             cols_int = ["boxes", "confirmed", "total_units"]
-
-            def convertir_entero_seguro(x):
-                if pd.isna(x):
-                    return None
-                s = str(x).strip().lower()
-                if s in ("", "nan", "none", "<na>", "na"):
-                    return None
-                try:
-                    return int(float(s))
-                except Exception:
-                    return None
-
             for col in cols_int:
                 if col in df.columns:
-                    df[col] = df[col].apply(convertir_entero_seguro)
+                    df[col] = df[col].apply(_convertir_entero_seguro)
 
-            # Nos quedamos solo con las columnas que existen en la tabla
+            # Filtrar BASURA: solo filas con vendor, product y ship_date.
+            # Las filas de "Report Explanation", "PO #: PO Number", etc, NO tienen eso.
+            for col_obligatoria in ("vendor", "product", "ship_date"):
+                if col_obligatoria in df.columns:
+                    df = df[df[col_obligatoria].notna()]
+
+            # Reducimos a las columnas que realmente existen en la tabla
             columnas_validas = list(mapeo.values())
             df = df[[c for c in df.columns if c in columnas_validas]]
 
-            # Limpieza de filas completamente vacías
+            # Fuera filas totalmente vacías
             df = df.dropna(how="all").reset_index(drop=True)
+
+            # Evitar duplicados dentro del propio archivo
+            if {"po_number", "product", "vendor"}.issubset(df.columns):
+                df = df.drop_duplicates(
+                    subset=["po_number", "product", "vendor"], keep="last"
+                )
 
             resultado = insertar_dataframe(
                 tabla_destino,
@@ -107,12 +115,12 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         # ============================================================
-        # CASO GENERAL: cualquier otra tabla (proveedores, airlines, etc.)
+        # CASO GENERAL: proveedores, airlines, etc.
         # ============================================================
         else:
             # 1) Esquema real de la tabla en Supabase
             esquema = obtener_columnas_tabla(tabla_destino)
-            #   esquema = [ {"nombre": "...", "tipo": "...", ...}, ... ]
+            #   esquema = [ {"nombre": "...", ...}, ... ]
 
             # Mapa: nombre_normalizado_en_db -> nombre_real_en_db
             mapa_db = {
@@ -120,7 +128,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for col in esquema
             }
 
-            # 2) Normalizamos nombres del archivo
+            # 2) Normalizamos nombres del archivo (solo espacios y minúsculas)
             df.columns = [str(c).strip() for c in df.columns]
 
             columnas_originales = []
@@ -131,29 +139,35 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if key in mapa_db:
                     columnas_originales.append(c)
                     renombrar[c] = mapa_db[key]
-                # si NO está en el mapa_db => se ignora, tal como querías
+                # si NO está en mapa_db => se ignora, justo lo que querías
 
-            # Si ninguna columna coincide, df quedará vacío y ya
+            # Si ninguna columna coincide, df quedará vacío
             if columnas_originales:
                 df = df[columnas_originales]
                 df = df.rename(columns=renombrar)
             else:
-                df = df.iloc[0:0]  # DataFrame vacío con 0 filas
+                df = df.iloc[0:0]
 
             # Quitamos filas 100% vacías
             df = df.dropna(how="all").reset_index(drop=True)
 
-            # Inserción sin upsert por defecto (si quieres upsert aquí,
-            # se puede meter luego una clave única por tabla).
+            # Clave única y deduplicación por tabla
+            clave_unica = None
+            if tabla_destino == "proveedores" and "codigo" in df.columns:
+                clave_unica = "codigo"
+                df = df.drop_duplicates(subset=["codigo"], keep="last")
+            elif tabla_destino == "airlines" and "cod" in df.columns:
+                clave_unica = "cod"
+                df = df.drop_duplicates(subset=["cod"], keep="last")
+
             resultado = insertar_dataframe(
                 tabla_destino,
                 df,
-                columna_unica=None,
+                columna_unica=clave_unica,
             )
 
         await update.message.reply_text(f"✔️ {resultado}")
 
     except Exception as e:
-        # Si algo peta, que al menos sepas por qué
         await update.message.reply_text(f"❌ Error: {e}")
 
