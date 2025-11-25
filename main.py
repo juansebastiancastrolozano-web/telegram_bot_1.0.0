@@ -9,6 +9,8 @@ from handlers.help import handle_help
 from handlers.archivos import handle_file
 from handlers.tabla import set_tabla
 from handlers.tablageneral import tablageneral
+from handlers.gestion_pedidos import comando_sugerir_pedido, procesar_callback_pedido, recibir_ajuste_precio
+from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, filters
 import requests
 
 # Cargar variables del entorno
@@ -67,8 +69,9 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
     app.add_handler(CommandHandler("tabla", set_tabla))
     app.add_handler(CommandHandler("tablageneral", tablageneral))
-   
-   
+    app.add_handler(CommandHandler("sugerir", comando_sugerir_pedido))
+    app.add_handler(CallbackQueryHandler(procesar_callback_pedido))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_ajuste_precio))
     print("🤖 Bot iniciado... esperando mensajes.")
     app.run_polling()
 
