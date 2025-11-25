@@ -80,7 +80,7 @@ async def procesar_callback_pedido(update: Update, context: ContextTypes.DEFAULT
     elif accion == "ajust":
         # Guardamos el ID en el contexto del usuario para esperar su input numérico
         context.user_data['prediccion_activa_id'] = pred_id
-        print(f"📝 DEBUG: Modo edición activado para Pred ID: {pred_id}")
+        
         await query.edit_message_text(
             f"📝 **Modo de Edición de Precio**\n\n"
             f"Por favor, ingrese el *Precio Unitario Real* de cierre (Ej: 0.38):",
@@ -93,41 +93,26 @@ async def procesar_callback_pedido(update: Update, context: ContextTypes.DEFAULT
 async def recibir_ajuste_precio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Captura el input de texto del usuario cuando está en modo de ajuste.
-    Ahora con DEPURACIÓN RUIDOSA.
     """
-    # 1. DEBUG: Imprimimos en la terminal qué está pasando
     user_msg = update.message.text
-    print(f"🔍 DEBUG: Mensaje recibido: '{user_msg}'")
-    
-    # Intentamos recuperar el estado
     pred_id = context.user_data.get('prediccion_activa_id')
-    print(f"🔍 DEBUG: Memoria del usuario (user_data): {context.user_data}")
 
-    # 2. MANEJO DE SESIÓN PERDIDA
+    # Si no hay ID activo, ignoramos el mensaje (o lo maneja otro handler)
+    # Aquí no imprimimos nada para no ensuciar el log ni responder a mensajes normales
     if not pred_id:
-        print("❌ DEBUG: No se encontró ID de predicción activo. Ignorando mensaje (o manejando como chat normal).")
-        # Opcional: Si parece un precio, avisamos que la sesión expiró
-        if user_msg.replace(".", "").replace(",", "").isdigit():
-             await update.message.reply_text(
-                 "⚠️ **Sesión de edición expirada.**\n"
-                 "Por favor, vuelve a presionar el botón '📝 Ajustar Precio' arriba para reactivar la edición.",
-                 parse_mode="Markdown"
-             )
         return 
 
-    texto_input = update.message.text.strip()
+    texto_input = user_msg.strip()
 
-    # 3. Validación de tipo de dato
+    # Validación simple de tipo de dato
     try:
         # Reemplazamos coma por punto para decimales latinos/europeos
         precio_real = float(texto_input.replace(",", "."))
     except ValueError:
-        await update.message.reply_text("⚠️ Eso no parece un precio válido. Ingresa solo el número (ej. 0.45).")
+        await update.message.reply_text("⚠️ Formato inválido. Por favor ingrese solo el número (ej. 0.45).")
         return
 
-    print(f"✅ DEBUG: Guardando ajuste para ID {pred_id} con precio {precio_real}")
-
-    # 4. Registro en base de datos
+    # Registro en base de datos
     exito = gestor_ventas.registrar_ajuste_usuario(pred_id, precio_real)
 
     if exito:
@@ -137,7 +122,6 @@ async def recibir_ajuste_precio(update: Update, context: ContextTypes.DEFAULT_TY
             f"El sistema ha actualizado sus parámetros de aprendizaje.",
             parse_mode="Markdown"
         )
-        context.user_data['prediccion_activa_id'] = None # Limpiar estado para evitar conflictos futuros
-        print("🎉 DEBUG: Éxito total. Estado limpiado.")
+        context.user_data['prediccion_activa_id'] = None # Limpiar estado
     else:
         await update.message.reply_text("❌ Error interno al guardar en base de datos.")
