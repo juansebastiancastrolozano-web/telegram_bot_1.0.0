@@ -1,3 +1,4 @@
+# services/motor_ventas.py
 from datetime import datetime
 from typing import Optional, Tuple, Dict, Any
 from services.cliente_supabase import db_client, logger
@@ -16,7 +17,7 @@ class GestorPrediccionVentas:
         Método auxiliar para resolver la identidad del cliente.
         """
         try:
-            # 1. Resolver ID basado en Código (MEXT -> UUID)
+            # 1. Resolver ID basado en Código
             res_id = self.db.table("customers")\
                 .select("id, name, code")\
                 .or_(f"code.eq.{codigo_cliente},customer_code.eq.{codigo_cliente}")\
@@ -93,8 +94,7 @@ class GestorPrediccionVentas:
                 }
             }
 
-            # Paso 5: Auditoría y obtención de ID REAL
-            # IMPORTANTE: Obtenemos el ID real de la base de datos, no uno inventado.
+            # Paso 5: Auditoría y obtención de ID REAL (con manejo de FK conflictivas)
             prediction_id = self._registrar_auditoria(perfil.get('id'), detalle_sugerencia)
             
             return prediction_id, detalle_sugerencia
@@ -104,34 +104,52 @@ class GestorPrediccionVentas:
             return None, {"error": str(e)}
 
     def _registrar_auditoria(self, client_id: str, sugerencia: dict):
-        """Escribe en prediction_history y retorna el UUID generado"""
+        """Escribe en prediction_history y retorna el UUID generado. Maneja errores de FK."""
+        
+        payload = {
+            "client_id": client_id,
+            "input_context": sugerencia["metricas_base"],
+            "bot_suggestion": sugerencia,
+            "created_at": datetime.utcnow().isoformat()
+        }
+
         try:
-            payload = {
-                "client_id": client_id,
-                "input_context": sugerencia["metricas_base"],
-                "bot_suggestion": sugerencia,
-                "created_at": datetime.utcnow().isoformat()
-            }
-            
-            # Ejecutamos insert. Supabase devuelve data por defecto si la tabla tiene permisos.
-            # No encadenamos .select() para evitar problemas de versión.
+            # Intento 1: Inserción estándar (Esperando que el client_id exista en 'clients')
             response = self.db.table("prediction_history").insert(payload).execute()
             
-            # Verificamos si hay datos en la respuesta
             if response.data and len(response.data) > 0:
-                return response.data[0]['id'] # Retornamos el UUID real
+                return response.data[0]['id']
             
-            logger.error("Se insertó pero no devolvió ID. Revisar permisos RLS en Supabase.")
+            logger.error("Se insertó pero no devolvió ID.")
             return None
 
         except Exception as e:
-            logger.error(f"No se pudo guardar historial: {e}")
-            # Fallback: Generamos un ID temporal si falla la base de datos para no romper el flujo del bot
+            error_msg = str(e)
+            
+            # CORRECCIÓN CLAVE: Si falla por llave foránea (código 23503), reintentamos sin ID
+            if "23503" in error_msg or "foreign key constraint" in error_msg:
+                logger.warning(f"Conflicto de FK para cliente {client_id}. Guardando como registro huérfano.")
+                
+                # Quitamos el client_id conflictivo para que pase la validación
+                payload["client_id"] = None 
+                
+                try:
+                    # Intento 2: Inserción huérfana
+                    response = self.db.table("prediction_history").insert(payload).execute()
+                    if response.data and len(response.data) > 0:
+                        return response.data[0]['id']
+                except Exception as e2:
+                    logger.error(f"Fallo total guardando historial huérfano: {e2}")
+            else:
+                # Si es otro error, lo reportamos
+                logger.error(f"No se pudo guardar historial: {e}")
+            
+            # Fallback final: ID Temporal para no romper el bot
             return f"TEMP-{int(datetime.now().timestamp())}"
 
     def registrar_ajuste_usuario(self, prediction_id: str, precio_real: float) -> bool:
         """
-        Registra la corrección del usuario (Human-in-the-loop).
+        Registra la corrección del usuario.
         """
         try:
             # Si es un ID temporal, no podemos guardar en DB
@@ -146,7 +164,6 @@ class GestorPrediccionVentas:
                 }
             }
             
-            # Actualizamos usando el ID
             self.db.table("prediction_history")\
                 .update(payload)\
                 .eq("id", prediction_id)\
