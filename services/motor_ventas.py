@@ -112,22 +112,33 @@ class GestorPrediccionVentas:
                 "bot_suggestion": sugerencia,
                 "created_at": datetime.utcnow().isoformat()
             }
-            # .select() es vital para que retorne el ID creado
-            response = self.db.table("prediction_history").insert(payload).select().execute()
             
-            if response.data:
+            # Ejecutamos insert. Supabase devuelve data por defecto si la tabla tiene permisos.
+            # No encadenamos .select() para evitar problemas de versión.
+            response = self.db.table("prediction_history").insert(payload).execute()
+            
+            # Verificamos si hay datos en la respuesta
+            if response.data and len(response.data) > 0:
                 return response.data[0]['id'] # Retornamos el UUID real
-            return None
-        except Exception as e:
-            logger.error(f"No se pudo guardar historial: {e}")
+            
+            logger.error("Se insertó pero no devolvió ID. Revisar permisos RLS en Supabase.")
             return None
 
-    # --- ESTA ES LA FUNCIÓN QUE FALTABA ---
+        except Exception as e:
+            logger.error(f"No se pudo guardar historial: {e}")
+            # Fallback: Generamos un ID temporal si falla la base de datos para no romper el flujo del bot
+            return f"TEMP-{int(datetime.now().timestamp())}"
+
     def registrar_ajuste_usuario(self, prediction_id: str, precio_real: float) -> bool:
         """
         Registra la corrección del usuario (Human-in-the-loop).
         """
         try:
+            # Si es un ID temporal, no podemos guardar en DB
+            if str(prediction_id).startswith("TEMP-"):
+                logger.warning("Intento de actualizar un ID temporal. Ignorando.")
+                return False
+
             payload = {
                 "user_correction": {
                     "precio_cierre": precio_real,
