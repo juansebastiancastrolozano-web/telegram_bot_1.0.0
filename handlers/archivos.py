@@ -7,6 +7,8 @@ from handlers.tabla import user_tablas
 from services.table_loader import cargar_tabla
 from services.supabase_insert import insertar_dataframe
 from services.table_detector import obtener_columnas_tabla
+# --- NUEVO IMPORT VITAL ---
+from services.ingestor_komet import ingestor_komet
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -37,18 +39,44 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"Procesando {archivo.file_name}…")
 
+    # ============================================================
+    # 🧠 CEREBRO NUEVO: Detección Automática de "Confirm POs"
+    # ============================================================
+    # Si el archivo parece un reporte sucio de Komet, lo limpiamos y cargamos relacionalmente.
+    if "confirm" in archivo.file_name.lower() and "po" in archivo.file_name.lower():
+        await update.message.reply_text("⚙️ Detectado formato Komet (Sucio). Iniciando limpieza y carga relacional...")
+        
+        try:
+            # Llamamos al especialista
+            resultado = ingestor_komet.procesar_archivo(ruta)
+            await update.message.reply_text(resultado)
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error en ingestor Komet: {e}")
+        finally:
+            # Limpiamos la evidencia
+            try: os.remove(ruta)
+            except: pass
+        
+        return  # ¡IMPORTANTE! Salimos aquí para que no ejecute la lógica antigua.
+
+    # ============================================================
+    # 🦖 CEREBRO ANTIGUO: Lógica Manual (/tabla)
+    # ============================================================
     try:
         user_id = update.message.from_user.id
         tabla_destino = user_tablas.get(user_id)
 
         if not tabla_destino:
             await update.message.reply_text("Primero selecciona una tabla con /tabla …")
+            # Borramos el archivo para no llenar el disco
+            try: os.remove(ruta)
+            except: pass
             return
 
         df = cargar_tabla(ruta)
 
         # ============================================================
-        # CONFIRM PO
+        # CONFIRM PO (LEGACY - Solo si alguien fuerza la tabla manualmente)
         # ============================================================
         if tabla_destino == "confirm_po":
             mapeo = {
@@ -93,7 +121,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 df,
                 columna_unica="po_number,product,vendor",
             )
-
         # ============================================================
         # GENERAL (proveedores, airlines, etc.)
         # ============================================================
@@ -138,3 +165,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
+    finally:
+        # Limpieza de cortesía
+        try: os.remove(ruta)
+        except: pass
