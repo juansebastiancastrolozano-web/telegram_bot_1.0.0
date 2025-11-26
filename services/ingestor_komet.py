@@ -7,42 +7,49 @@ logger = logging.getLogger(__name__)
 
 class IngestorKomet:
     """
-    Especialista en digerir reportes sucios de Komet Sales (XLS/CSV).
-    Estrategia: Búsqueda de Ancla Dinámica.
+    Especialista en digerir reportes sucios de Komet Sales.
+    Versión 2.0: Con filtros de basura y corrección de Supabase.
     """
 
     def procesar_archivo(self, ruta_archivo: str):
-        """
-        Lee el archivo, encuentra la tabla real, limpia los datos y los carga a Supabase.
-        """
         try:
-            # 1. Carga Cruda (Leemos todo como texto primero para no romper formatos)
-            # Usamos header=None para leer desde la fila 0 absoluta
-            df_raw = pd.read_csv(ruta_archivo, header=None) if ruta_archivo.endswith('.csv') else pd.read_excel(ruta_archivo, header=None)
+            # 1. Lectura Agnostic (CSV o Excel)
+            if ruta_archivo.lower().endswith('.csv'):
+                # Intentamos detectar encoding, latin1 suele funcionar para excels viejos guardados como csv
+                try:
+                    df_raw = pd.read_csv(ruta_archivo, header=None, encoding='utf-8')
+                except:
+                    df_raw = pd.read_csv(ruta_archivo, header=None, encoding='latin1')
+            else:
+                df_raw = pd.read_excel(ruta_archivo, header=None)
 
-            # 2. Búsqueda del Ancla (El Francotirador)
+            # 2. Búsqueda del Ancla (La Fila Sagrada)
             indice_header = None
             for i, row in df_raw.iterrows():
-                # Convertimos la fila a string y buscamos las palabras clave
                 fila_str = " ".join([str(x) for x in row.values]).lower()
+                # Buscamos la huella digital de la cabecera
                 if "po #" in fila_str and "vendor" in fila_str and "product" in fila_str:
                     indice_header = i
                     break
             
             if indice_header is None:
-                return "❌ No encontré la tabla de órdenes. ¿Es el formato correcto?"
+                return "❌ No encontré la estructura de Komet (PO #, Vendor...). Revisar archivo."
 
-            # 3. Reconstrucción de la Tabla
-            # Tomamos la fila del ancla como nombres de columna
+            # 3. Reconstrucción
             df = df_raw.iloc[indice_header + 1:].copy()
             df.columns = df_raw.iloc[indice_header].values
             
-            # 4. Limpieza Profunda (Ducha de Datos)
-            # Eliminamos filas vacías o basura del footer
-            df = df.dropna(subset=['PO #']) # Si no tiene PO, es basura
-            
-            # Normalizamos nombres de columnas (quitamos espacios y puntos)
+            # Limpieza de nombres de columnas
             df.columns = [str(col).strip().replace('.', '') for col in df.columns]
+
+            # 4. FILTRO DE SANIDAD (NUEVO)
+            # Eliminamos filas vacías en PO
+            df = df.dropna(subset=['PO #'])
+            
+            # Eliminamos filas "Basura" (Leyendas, Totales, Explicaciones)
+            # Regla: Un PO real no suele tener espacios en blanco ni dos puntos (ej: "P083638" es válido, "B/T: Box" no lo es)
+            # Convertimos a string y filtramos lo que parezca ruido
+            df = df[df['PO #'].astype(str).str.match(r'^[A-Za-z0-9-]+$')]
 
             return self._cargar_a_supabase_relacional(df)
 
@@ -51,94 +58,106 @@ class IngestorKomet:
             return f"💥 Error procesando archivo: {str(e)}"
 
     def _cargar_a_supabase_relacional(self, df: pd.DataFrame):
-        """
-        Transforma el DataFrame plano en estructura Relacional (Header -> Items)
-        y carga a Supabase.
-        """
         ordenes_creadas = 0
         items_creados = 0
         errores = []
 
-        # Agrupamos por PO #. 
-        # Komet repite el PO # en cada fila. Nosotros necesitamos 1 Header por PO.
+        # Agrupamos por PO # (Una PO puede tener varias filas/items)
         grupos_po = df.groupby('PO #')
 
         for po_number, grupo in grupos_po:
             try:
-                # --- PASO A: CREAR CABECERA (SALES_ORDERS) ---
-                # Tomamos los datos de la primera fila del grupo (son comunes)
+                po_str = str(po_number).strip()
+                
+                # Validación extra: Si el PO es muy corto o parece texto descriptivo, saltar
+                if len(po_str) < 3 or "total" in po_str.lower(): 
+                    continue
+
+                # --- PASO A: CABECERA (SALES_ORDERS) ---
                 primera_fila = grupo.iloc[0]
                 
-                # Convertir fecha "10/08/2025" a ISO YYYY-MM-DD
+                # Manejo de Fechas resiliente
                 fecha_raw = str(primera_fila.get('Ship Date', ''))
                 try:
+                    # Komet suele dar fechas tipo '2025-10-08' o '10/08/2025'
                     fecha_obj = pd.to_datetime(fecha_raw).strftime('%Y-%m-%d')
                 except:
-                    fecha_obj = datetime.now().strftime('%Y-%m-%d') # Fallback hoy
+                    fecha_obj = datetime.now().strftime('%Y-%m-%d')
+
+                # Totales calculados
+                try:
+                    total_boxes = int(pd.to_numeric(grupo['Qty PO'], errors='coerce').sum())
+                    # Costo * Unidades = Valor Total
+                    costos = pd.to_numeric(grupo['Cost'], errors='coerce').fillna(0)
+                    unidades = pd.to_numeric(grupo['Total U'], errors='coerce').fillna(0)
+                    total_value = float((costos * unidades).sum())
+                except:
+                    total_boxes = 0
+                    total_value = 0.0
 
                 cabecera = {
-                    "po_number": str(po_number),
+                    "po_number": po_str,
                     "vendor": str(primera_fila.get('Vendor', '')),
                     "ship_date": fecha_obj,
                     "origin": str(primera_fila.get('Origin', 'BOG')),
                     "status": str(primera_fila.get('Status', 'Confirmed')),
-                    "source_file": "Komet_Import_XLS",
-                    # Sumamos todo el grupo para tener totales en la cabecera
-                    "total_boxes": int(pd.to_numeric(grupo['Qty PO'], errors='coerce').sum()),
-                    # Asumiendo que Cost * Total U es el valor total, o similar. Ajusta según tu lógica financiera.
-                    "total_value": float((pd.to_numeric(grupo['Cost'], errors='coerce') * pd.to_numeric(grupo['Total U'], errors='coerce')).sum())
+                    "source_file": "Komet_Excel_Upload",
+                    "total_boxes": total_boxes,
+                    "total_value": total_value
                 }
 
-                # Insertamos Cabecera (upsert para no duplicar si subes el archivo 2 veces)
-                # .select() devuelve el ID (existente o nuevo)
-                res_head = db_client.table("sales_orders").upsert(cabecera, on_conflict="po_number").select().execute()
+                # --- CORRECCIÓN SUPABASE: UPSERT SIN .SELECT() ---
+                # Upsert devuelve datos por defecto en la mayoría de configs
+                res_head = db_client.table("sales_orders").upsert(cabecera, on_conflict="po_number").execute()
                 
                 if not res_head.data:
-                    errores.append(f"Fallo header PO {po_number}")
+                    errores.append(f"No devolvió ID para PO {po_str}")
                     continue
                 
                 order_id = res_head.data[0]['id']
                 ordenes_creadas += 1
 
-                # --- PASO B: CREAR ITEMS (SALES_ITEMS) ---
+                # --- PASO B: ÍTEMS (SALES_ITEMS) ---
                 items_para_insertar = []
                 for _, row in grupo.iterrows():
                     
-                    total_units = int(pd.to_numeric(row.get('Total U'), errors='coerce') or 0)
-                    cost_unit = float(pd.to_numeric(row.get('Cost'), errors='coerce') or 0)
+                    # Limpieza de números por fila
+                    qty = int(pd.to_numeric(row.get('Qty PO'), errors='coerce') or 0)
+                    units = int(pd.to_numeric(row.get('Total U'), errors='coerce') or 0)
+                    price = float(pd.to_numeric(row.get('Cost'), errors='coerce') or 0.0)
                     
                     items_para_insertar.append({
                         "order_id": order_id,
-                        "customer_code": str(row.get('Customer', '')), # ¡Aquí está el cliente real! (C-WDG)
+                        "customer_code": str(row.get('Customer', '')).strip(),
                         "mark_code": str(row.get('Mark Code', '')),
                         "product_name": str(row.get('Product', '')),
-                        "box_type": str(row.get('B/T', 'QB')), # Box Type
-                        "boxes": int(pd.to_numeric(row.get('Qty PO'), errors='coerce') or 0),
-                        "total_units": total_units,
-                        "unit_price": cost_unit,
-                        "total_line_value": total_units * cost_unit,
+                        "box_type": str(row.get('B/T', 'QB')),
+                        "boxes": qty,
+                        "total_units": units,
+                        "unit_price": price,
+                        "total_line_value": units * price,
                         "notes": str(row.get('Notes for the vendor', ''))
                     })
 
-                # Insertamos todos los items de esta PO de golpe
-                # Primero borramos los anteriores de esta PO para evitar duplicados al re-subir
-                db_client.table("sales_items").delete().eq("order_id", order_id).execute()
-                
-                # Insertamos los nuevos
-                db_client.table("sales_items").insert(items_para_insertar).execute()
-                items_creados += len(items_para_insertar)
+                if items_para_insertar:
+                    # Limpieza previa de items para esta orden (idempotencia)
+                    db_client.table("sales_items").delete().eq("order_id", order_id).execute()
+                    # Inserción masiva
+                    db_client.table("sales_items").insert(items_para_insertar).execute()
+                    items_creados += len(items_para_insertar)
 
             except Exception as e:
-                errores.append(f"Error en PO {po_number}: {str(e)}")
+                # Si falla una PO, registramos pero seguimos con la siguiente
+                errores.append(f"PO {po_number}: {str(e)}")
 
-        # Reporte Final
-        resumen = f"✅ Procesamiento Komet Finalizado:\n"
-        resumen += f"📦 Órdenes (Headers): {ordenes_creadas}\n"
-        resumen += f"🌺 Ítems (Detalles): {items_creados}\n"
+        # Reporte
+        resumen = f"✅ <b>Procesamiento Finalizado</b>\n"
+        resumen += f"📦 Órdenes: {ordenes_creadas}\n"
+        resumen += f"🌺 Ítems: {items_creados}\n"
+        
         if errores:
-            resumen += f"\n⚠️ Errores ({len(errores)}): {'; '.join(errores[:3])}..."
+            errores_limpios = [e for e in errores if "SyncQueryRequestBuilder" not in e] # Ocultamos errores técnicos repetidos
+            if errores_limpios:
+                resumen += f"\n⚠️ <b>Alertas:</b> {len(errores_limpios)}"
         
         return resumen
-
-# Instancia lista para usar
-ingestor_komet = IngestorKomet()
