@@ -1,4 +1,4 @@
-import uuid  # <--- IMPORTACIÓN VITAL AÑADIDA
+import uuid
 from datetime import datetime
 from typing import Optional, Tuple, Dict, Any
 from services.cliente_supabase import db_client, logger
@@ -14,7 +14,7 @@ class GestorPrediccionVentas:
     def _obtener_perfil_cliente(self, codigo_cliente: str):
         """Método auxiliar para resolver la identidad del cliente."""
         try:
-            # Buscamos por código o customer_code
+            # 1. Resolver ID basado en Código
             res_id = self.db.table("customers")\
                 .select("id, name, code")\
                 .or_(f"code.eq.{codigo_cliente},customer_code.eq.{codigo_cliente}")\
@@ -26,7 +26,7 @@ class GestorPrediccionVentas:
             cliente_maestro = res_id.data[0]
             uuid_cliente = cliente_maestro['id']
 
-            # Consultamos RFM
+            # 2. Consultar Métricas RFM
             res_rfm = self.db.table("v_customer_rfm")\
                 .select("*")\
                 .eq("customer_id", uuid_cliente)\
@@ -129,49 +129,59 @@ class GestorPrediccionVentas:
             logger.error(f"Error ajuste: {e}")
             return False
 
-    # --- MÉTODO CORREGIDO: CON GENERACIÓN DE UUID MANUAL ---
+    # --- VERSIÓN DEFINITIVA: ESTRUCTURA RELACIONAL (HEADER + ITEMS) ---
     def crear_orden_confirmada(self, datos_orden: dict) -> str:
         """
-        Materializa la orden en 'confirm_po'. Genera UUID manual para evitar errores.
+        Crea una orden estructurada en 'sales_orders' y 'sales_items'.
         """
         try:
-            # 1. Generamos identidad única (PO y UUID)
-            po_generado = f"BOT-{int(datetime.now().timestamp())}"
-            nuevo_id = str(uuid.uuid4()) # <--- LA CURA DEL ERROR
-
-            # 2. Mapeo robusto
-            registro = {
-                "id": nuevo_id, # Obligatorio si la DB no tiene auto-gen
-                "po_number": po_generado,
+            # 1. Generamos PO Number Único
+            po_number = f"P{int(datetime.now().timestamp())}"
+            
+            # 2. Preparar Cabecera (La Logística)
+            cabecera = {
+                "po_number": po_number,
                 "vendor": datos_orden.get("vendor", "BM"),
                 "ship_date": datetime.now().strftime("%Y-%m-%d"),
-                "product": datos_orden["producto_descripcion"],
-                "boxes": int(datos_orden["cajas"]),
-                "confirmed": int(datos_orden["cajas"]),
-                "box_type": datos_orden["tipo_caja"],
-                "total_units": int(datos_orden["total_tallos"]),
-                "cost": float(datos_orden["precio_unitario"]),
-                "customer_name": datos_orden["cliente_nombre"],
                 "origin": "BOG",
                 "status": "Confirmed",
-                "notes": "Generado por Bot Telegram",
-                "source_file": "Telegram_API",
-                "created_at": datetime.utcnow().isoformat()
+                "source_file": "Bot_Telegram_V1",
+                "total_boxes": int(datos_orden["cajas"]),
+                "total_value": float(datos_orden["valor_total_pedido"])
             }
 
-            print(f"📤 Intentando insertar en confirm_po: {po_generado}") # Debug visual
+            # 3. Insertar Cabecera
+            # Usamos insert().select() porque en tablas nuevas con RLS default suele funcionar bien
+            # Si falla, prueba quitar .select() como hicimos antes
+            res_head = self.db.table("sales_orders").insert(cabecera).execute()
+            
+            if not res_head.data:
+                logger.error("Fallo al crear cabecera sales_orders")
+                return None
+            
+            order_uuid = res_head.data[0]['id']
 
-            # 3. Inserción
-            res = self.db.table("confirm_po").insert(registro).execute()
+            # 4. Preparar Ítem (El Producto Específico)
+            item = {
+                "order_id": order_uuid,
+                "customer_code": datos_orden["cliente_nombre"], # El cliente va en el item
+                "product_name": datos_orden["producto_descripcion"],
+                "box_type": datos_orden["tipo_caja"],
+                "boxes": int(datos_orden["cajas"]),
+                "total_units": int(datos_orden["total_tallos"]),
+                "unit_price": float(datos_orden["precio_unitario"]),
+                "total_line_value": float(datos_orden["valor_total_pedido"]),
+                "notes": "Generado vía Bot"
+            }
+
+            # 5. Insertar Ítem
+            self.db.table("sales_items").insert(item).execute()
             
-            if res.data:
-                logger.info(f"✅ PO Creada exitosamente: {po_generado}")
-                return po_generado
-            
-            return None
+            logger.info(f"✅ Orden Relacional Creada: {po_number}")
+            return po_number
 
         except Exception as e:
-            # Si falla, esto saldrá en tu terminal para que sepamos QUÉ pasó
-            print(f"🔴 ERROR FATAL CREANDO PO: {e}") 
-            logger.error(f"Error fatal creando PO: {e}")
+            # Imprimir error real en consola para debug inmediato
+            print(f"🔴 ERROR DB: {e}")
+            logger.error(f"Error fatal creando Orden Relacional: {e}")
             return None

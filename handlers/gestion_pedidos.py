@@ -1,4 +1,3 @@
-# handlers/gestion_pedidos.py
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from services.motor_ventas import GestorPrediccionVentas
@@ -31,7 +30,6 @@ async def comando_sugerir_pedido(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     # Guardamos el nombre real del cliente en el contexto para usarlo al confirmar
-    # Ojo: usamos .get para evitar errores si el cliente no tiene nombre en la DB
     nombre_cliente = sugerencia.get('cliente_nombre') or codigo_cliente
     context.user_data['cliente_actual_nombre'] = nombre_cliente
 
@@ -81,8 +79,6 @@ async def procesar_callback_pedido(update: Update, context: ContextTypes.DEFAULT
         precio = 0.45 # Precio final acordado
         producto = "Spray Rose Assorted 50cm (Bot)"
         
-        # Recuperamos nombre del cliente del contexto (o fallback a MEXT)
-        # Importante: Si usamos el nombre largo, aseguramos que sea string válido
         cliente_nombre = context.user_data.get('cliente_actual_nombre', "MEXT")
 
         # 1. Cálculo Matemático
@@ -94,7 +90,8 @@ async def procesar_callback_pedido(update: Update, context: ContextTypes.DEFAULT
             precio_unitario=precio
         )
         
-        # 2. Materialización en Base de Datos (INSERT)
+        # 2. Materialización en Base de Datos (INSERT RELACIONAL)
+        # IMPORTANTE: Pasamos valor_total_pedido para que la cabecera sepa el total $$$
         datos_db = {
             "producto_descripcion": producto,
             "cajas": cantidad,
@@ -102,7 +99,8 @@ async def procesar_callback_pedido(update: Update, context: ContextTypes.DEFAULT
             "total_tallos": resultado['total_tallos'],
             "precio_unitario": precio,
             "cliente_nombre": cliente_nombre,
-            "vendor": "BM" 
+            "vendor": "BM",
+            "valor_total_pedido": resultado['valor_total']  # <--- CRUCIAL PARA LA NUEVA ESTRUCTURA
         }
         
         po_nuevo = gestor_ventas.crear_orden_confirmada(datos_db)
@@ -117,7 +115,7 @@ async def procesar_callback_pedido(update: Update, context: ContextTypes.DEFAULT
                 f"🌹 <b>Total:</b> {resultado['total_tallos']} tallos\n"
                 f"💰 <b>Valor:</b> ${resultado['valor_total']} USD\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"<i>(Guardado en tabla confirm_po)</i>"
+                f"<i>(Guardado en tablas sales_orders/sales_items)</i>"
             )
         else:
             msg = "❌ <b>Error crítico:</b> No se pudo guardar la PO en la base de datos."
