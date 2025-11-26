@@ -12,5 +12,5 @@ numpy
 psycopg2-binary
 tabulate
 
-weasyprint
+reportlab
 jinja2
