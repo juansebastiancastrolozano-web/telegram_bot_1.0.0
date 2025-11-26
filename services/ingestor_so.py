@@ -135,17 +135,15 @@ class IngestorSO:
 
         if reglas_batch:
             try:
-                # Usamos un lote para no saturar, pero supabase py a veces prefiere uno a uno si es upsert complejo
-                # Lo hacemos en bloque que es más rápido
-                # Nota: Asegúrate de que la tabla 'customer_packing_rules' tenga la constraint UNIQUE
+                # Upsert en la tabla de conocimiento
                 res = db_client.table("customer_packing_rules").upsert(
                     reglas_batch, 
                     on_conflict="customer_code,product_code,box_type"
                 ).execute()
-                # Si es exitoso, contamos cuántos enviamos (no siempre devuelve count exacto)
                 reglas_aprendidas = len(reglas_batch)
             except Exception as e:
                 logger.error(f"Error guardando reglas: {e}")
+                return f"❌ Error DB Logística: {str(e)}"
 
         return f"🧠 **Conocimiento Logístico Adquirido:**\n📚 Reglas de Empaque Procesadas: {reglas_aprendidas}"
 
@@ -228,4 +226,5 @@ class IngestorSO:
         
         return resumen
 
+# Instancia VITAL
 ingestor_so = IngestorSO()
