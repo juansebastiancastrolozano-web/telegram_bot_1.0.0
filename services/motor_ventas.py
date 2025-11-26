@@ -1,3 +1,4 @@
+import uuid  # <--- IMPORTACIÓN VITAL AÑADIDA
 from datetime import datetime
 from typing import Optional, Tuple, Dict, Any
 from services.cliente_supabase import db_client, logger
@@ -128,42 +129,49 @@ class GestorPrediccionVentas:
             logger.error(f"Error ajuste: {e}")
             return False
 
-    # --- EL NUEVO MÉTODO PARA INSERTAR LA ORDEN REAL ---
+    # --- MÉTODO CORREGIDO: CON GENERACIÓN DE UUID MANUAL ---
     def crear_orden_confirmada(self, datos_orden: dict) -> str:
         """
-        Materializa la orden en 'confirm_po'. Es el acto de creación.
+        Materializa la orden en 'confirm_po'. Genera UUID manual para evitar errores.
         """
         try:
-            # Generamos un PO Number único basado en el tiempo (Anarquía temporal)
+            # 1. Generamos identidad única (PO y UUID)
             po_generado = f"BOT-{int(datetime.now().timestamp())}"
+            nuevo_id = str(uuid.uuid4()) # <--- LA CURA DEL ERROR
 
-            # Mapeo directo a la estructura de tu JSON de confirm_po
+            # 2. Mapeo robusto
             registro = {
+                "id": nuevo_id, # Obligatorio si la DB no tiene auto-gen
                 "po_number": po_generado,
-                "vendor": datos_orden.get("vendor", "BM"), # BM como en tu ejemplo
-                "ship_date": datetime.now().strftime("%Y-%m-%d"), # Fecha de hoy
+                "vendor": datos_orden.get("vendor", "BM"),
+                "ship_date": datetime.now().strftime("%Y-%m-%d"),
                 "product": datos_orden["producto_descripcion"],
                 "boxes": int(datos_orden["cajas"]),
-                "confirmed": int(datos_orden["cajas"]), # Asumimos confirmación total
+                "confirmed": int(datos_orden["cajas"]),
                 "box_type": datos_orden["tipo_caja"],
                 "total_units": int(datos_orden["total_tallos"]),
                 "cost": float(datos_orden["precio_unitario"]),
                 "customer_name": datos_orden["cliente_nombre"],
                 "origin": "BOG",
-                "status": "Confirmed", # Estado sólido
-                "notes": "Orden generada automáticamente por J&G Bot 🤖",
-                "source_file": "Telegram_Bot_API", # Marca de origen
+                "status": "Confirmed",
+                "notes": "Generado por Bot Telegram",
+                "source_file": "Telegram_API",
                 "created_at": datetime.utcnow().isoformat()
             }
 
-            # Inserción en Supabase
+            print(f"📤 Intentando insertar en confirm_po: {po_generado}") # Debug visual
+
+            # 3. Inserción
             res = self.db.table("confirm_po").insert(registro).execute()
             
             if res.data:
-                logger.info(f"PO Creada: {po_generado}")
+                logger.info(f"✅ PO Creada exitosamente: {po_generado}")
                 return po_generado
+            
             return None
 
         except Exception as e:
+            # Si falla, esto saldrá en tu terminal para que sepamos QUÉ pasó
+            print(f"🔴 ERROR FATAL CREANDO PO: {e}") 
             logger.error(f"Error fatal creando PO: {e}")
             return None
