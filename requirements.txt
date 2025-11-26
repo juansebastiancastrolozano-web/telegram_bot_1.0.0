@@ -11,3 +11,6 @@ supabase
 numpy
 psycopg2-binary
 tabulate
+
+weasyprint
+jinja2
