@@ -1,23 +1,19 @@
-# services/motor_ventas.py
 from datetime import datetime
 from typing import Optional, Tuple, Dict, Any
 from services.cliente_supabase import db_client, logger
 
 class GestorPrediccionVentas:
     """
-    Motor de inteligencia comercial.
-    Convierte datos crudos (RFM) en estrategias de venta accionables.
+    Motor de inteligencia comercial y materialización de ventas.
     """
 
     def __init__(self):
         self.db = db_client
 
     def _obtener_perfil_cliente(self, codigo_cliente: str):
-        """
-        Método auxiliar para resolver la identidad del cliente.
-        """
+        """Método auxiliar para resolver la identidad del cliente."""
         try:
-            # 1. Resolver ID basado en Código
+            # Buscamos por código o customer_code
             res_id = self.db.table("customers")\
                 .select("id, name, code")\
                 .or_(f"code.eq.{codigo_cliente},customer_code.eq.{codigo_cliente}")\
@@ -29,24 +25,20 @@ class GestorPrediccionVentas:
             cliente_maestro = res_id.data[0]
             uuid_cliente = cliente_maestro['id']
 
-            # 2. Consultar Métricas RFM usando el ID exacto
+            # Consultamos RFM
             res_rfm = self.db.table("v_customer_rfm")\
                 .select("*")\
                 .eq("customer_id", uuid_cliente)\
                 .execute()
             
             perfil_rfm = res_rfm.data[0] if res_rfm.data else {}
-            
-            # Fusionamos la identidad con la estadística
-            perfil_completo = {**cliente_maestro, **perfil_rfm}
-            return perfil_completo, None
+            return {**cliente_maestro, **perfil_rfm}, None
 
         except Exception as e:
             return None, str(e)
 
     def generar_sugerencia_pedido(self, codigo_cliente: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         try:
-            # Paso 1: Identificación Robusta
             perfil, error = self._obtener_perfil_cliente(codigo_cliente)
             
             if error:
@@ -54,33 +46,31 @@ class GestorPrediccionVentas:
                 return None, {"error": "Error de conexión."}
             
             if not perfil:
-                return None, {"error": f"El código '{codigo_cliente}' no existe en el maestro de clientes."}
+                return None, {"error": f"El código '{codigo_cliente}' no existe."}
 
-            # Paso 2: Extracción y Saneamiento de Métricas
+            # Métricas
             dias_inactividad = perfil.get('days_since_last_order')
             ticket_promedio = float(perfil.get('avg_order_value') or 0.0)
             lifetime_orders = int(perfil.get('lifetime_orders') or 0)
 
-            # Paso 3: Lógica de Negocio
+            # Lógica de Negocio
             if dias_inactividad is None:
                 estrategia = "PROSPECCION"
                 producto = "Mix de Muestras"
                 precio_sugerido = 0.0
-                observacion = "Cliente registrado pero sin historial de compras visible."
-
+                observacion = "Cliente nuevo sin historial."
             elif dias_inactividad > 45:
                 estrategia = "REACTIVACION"
                 producto = "Freedom Red (Oferta Retorno)"
                 precio_sugerido = ticket_promedio * 0.92 
-                observacion = f"⚠️ ALERTA: Inactivo hace {dias_inactividad} días. Riesgo alto de pérdida."
-
+                observacion = f"⚠️ ALERTA: Inactivo hace {dias_inactividad} días."
             else:
                 estrategia = "MANTENIMIENTO"
                 producto = "Pedido Recurrente"
                 precio_sugerido = ticket_promedio
-                observacion = f"Cliente saludable. Última compra hace {dias_inactividad} días."
+                observacion = "Cliente saludable."
 
-            # Paso 4: Respuesta Formal
+            # Respuesta
             detalle_sugerencia = {
                 "cliente_nombre": perfil.get('name'),
                 "codigo_interno": perfil.get('code'),
@@ -94,9 +84,7 @@ class GestorPrediccionVentas:
                 }
             }
 
-            # Paso 5: Auditoría y obtención de ID REAL (con manejo de FK conflictivas)
             prediction_id = self._registrar_auditoria(perfil.get('id'), detalle_sugerencia)
-            
             return prediction_id, detalle_sugerencia
 
         except Exception as e:
@@ -104,73 +92,78 @@ class GestorPrediccionVentas:
             return None, {"error": str(e)}
 
     def _registrar_auditoria(self, client_id: str, sugerencia: dict):
-        """Escribe en prediction_history y retorna el UUID generado. Maneja errores de FK."""
-        
+        """Guarda en prediction_history. Maneja FKs rotas."""
         payload = {
             "client_id": client_id,
             "input_context": sugerencia["metricas_base"],
             "bot_suggestion": sugerencia,
             "created_at": datetime.utcnow().isoformat()
         }
-
         try:
-            # Intento 1: Inserción estándar (Esperando que el client_id exista en 'clients')
             response = self.db.table("prediction_history").insert(payload).execute()
-            
-            if response.data and len(response.data) > 0:
-                return response.data[0]['id']
-            
-            logger.error("Se insertó pero no devolvió ID.")
-            return None
-
+            if response.data: return response.data[0]['id']
         except Exception as e:
             error_msg = str(e)
-            
-            # CORRECCIÓN CLAVE: Si falla por llave foránea (código 23503), reintentamos sin ID
-            if "23503" in error_msg or "foreign key constraint" in error_msg:
-                logger.warning(f"Conflicto de FK para cliente {client_id}. Guardando como registro huérfano.")
-                
-                # Quitamos el client_id conflictivo para que pase la validación
-                payload["client_id"] = None 
-                
+            if "23503" in error_msg or "foreign key" in error_msg:
+                payload["client_id"] = None
                 try:
-                    # Intento 2: Inserción huérfana
                     response = self.db.table("prediction_history").insert(payload).execute()
-                    if response.data and len(response.data) > 0:
-                        return response.data[0]['id']
-                except Exception as e2:
-                    logger.error(f"Fallo total guardando historial huérfano: {e2}")
-            else:
-                # Si es otro error, lo reportamos
-                logger.error(f"No se pudo guardar historial: {e}")
-            
-            # Fallback final: ID Temporal para no romper el bot
+                    if response.data: return response.data[0]['id']
+                except: pass
             return f"TEMP-{int(datetime.now().timestamp())}"
 
     def registrar_ajuste_usuario(self, prediction_id: str, precio_real: float) -> bool:
-        """
-        Registra la corrección del usuario.
-        """
+        """Registra corrección humana."""
         try:
-            # Si es un ID temporal, no podemos guardar en DB
-            if str(prediction_id).startswith("TEMP-"):
-                logger.warning("Intento de actualizar un ID temporal. Ignorando.")
-                return False
-
+            if str(prediction_id).startswith("TEMP-"): return False
             payload = {
                 "user_correction": {
                     "precio_cierre": precio_real,
                     "fecha_ajuste": datetime.utcnow().isoformat()
                 }
             }
-            
-            self.db.table("prediction_history")\
-                .update(payload)\
-                .eq("id", prediction_id)\
-                .execute()
-            
-            logger.info(f"Ajuste guardado para ID {prediction_id}")
+            self.db.table("prediction_history").update(payload).eq("id", prediction_id).execute()
             return True
         except Exception as e:
-            logger.error(f"Error registrando ajuste en DB: {e}")
+            logger.error(f"Error ajuste: {e}")
             return False
+
+    # --- EL NUEVO MÉTODO PARA INSERTAR LA ORDEN REAL ---
+    def crear_orden_confirmada(self, datos_orden: dict) -> str:
+        """
+        Materializa la orden en 'confirm_po'. Es el acto de creación.
+        """
+        try:
+            # Generamos un PO Number único basado en el tiempo (Anarquía temporal)
+            po_generado = f"BOT-{int(datetime.now().timestamp())}"
+
+            # Mapeo directo a la estructura de tu JSON de confirm_po
+            registro = {
+                "po_number": po_generado,
+                "vendor": datos_orden.get("vendor", "BM"), # BM como en tu ejemplo
+                "ship_date": datetime.now().strftime("%Y-%m-%d"), # Fecha de hoy
+                "product": datos_orden["producto_descripcion"],
+                "boxes": int(datos_orden["cajas"]),
+                "confirmed": int(datos_orden["cajas"]), # Asumimos confirmación total
+                "box_type": datos_orden["tipo_caja"],
+                "total_units": int(datos_orden["total_tallos"]),
+                "cost": float(datos_orden["precio_unitario"]),
+                "customer_name": datos_orden["cliente_nombre"],
+                "origin": "BOG",
+                "status": "Confirmed", # Estado sólido
+                "notes": "Orden generada automáticamente por J&G Bot 🤖",
+                "source_file": "Telegram_Bot_API", # Marca de origen
+                "created_at": datetime.utcnow().isoformat()
+            }
+
+            # Inserción en Supabase
+            res = self.db.table("confirm_po").insert(registro).execute()
+            
+            if res.data:
+                logger.info(f"PO Creada: {po_generado}")
+                return po_generado
+            return None
+
+        except Exception as e:
+            logger.error(f"Error fatal creando PO: {e}")
+            return None
