@@ -7,8 +7,10 @@ from handlers.tabla import user_tablas
 from services.table_loader import cargar_tabla
 from services.supabase_insert import insertar_dataframe
 from services.table_detector import obtener_columnas_tabla
-# --- NUEVO IMPORT VITAL ---
+
+# --- IMPORTACIONES DE LOS CEREBROS NUEVOS ---
 from services.ingestor_komet import ingestor_komet
+from services.ingestor_so import ingestor_so
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -32,32 +34,43 @@ def _convertir_entero_seguro(x):
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     archivo = update.message.document
+    file_name_lower = archivo.file_name.lower()
+    
     tg_file = await context.bot.get_file(archivo.file_id)
-
     ruta = os.path.join(UPLOAD_DIR, archivo.file_name)
     await tg_file.download_to_drive(ruta)
 
-    await update.message.reply_text(f"Procesando {archivo.file_name}…")
+    await update.message.reply_text(f"📥 Procesando `{archivo.file_name}`...", parse_mode="Markdown")
 
     # ============================================================
-    # 🧠 CEREBRO NUEVO: Detección Automática de "Confirm POs"
+    # 🧠 INTELIGENCIA AUTOMÁTICA (Sin necesidad de /tabla)
     # ============================================================
-    # Si el archivo parece un reporte sucio de Komet, lo limpiamos y cargamos relacionalmente.
-    if "confirm" in archivo.file_name.lower() and "po" in archivo.file_name.lower():
-        await update.message.reply_text("⚙️ Detectado formato Komet (Sucio). Iniciando limpieza y carga relacional...")
-        
+    
+    # 1. CASO KOMET (Confirm POs)
+    if "confirm" in file_name_lower and "po" in file_name_lower:
+        await update.message.reply_text("⚙️ Detectado formato Komet. Iniciando limpieza...", parse_mode="Markdown")
         try:
-            # Llamamos al especialista
             resultado = ingestor_komet.procesar_archivo(ruta)
-            await update.message.reply_text(resultado)
+            await update.message.reply_text(resultado, parse_mode="HTML")
         except Exception as e:
-            await update.message.reply_text(f"❌ Error en ingestor Komet: {e}")
+            await update.message.reply_text(f"❌ Error Komet: {e}")
         finally:
-            # Limpiamos la evidencia
             try: os.remove(ruta)
             except: pass
-        
-        return  # ¡IMPORTANTE! Salimos aquí para que no ejecute la lógica antigua.
+        return # Salimos para no ejecutar el resto
+
+    # 2. CASO ARCHIVO MAESTRO (Hoja SO)
+    elif "orde_de_pedido" in file_name_lower or "so" in file_name_lower:
+        await update.message.reply_text("💰 Detectado Archivo Maestro. Auditando finanzas (Hoja SO)...", parse_mode="Markdown")
+        try:
+            resultado = ingestor_so.procesar_master_file(ruta)
+            await update.message.reply_text(resultado, parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error Auditoría SO: {e}")
+        finally:
+            try: os.remove(ruta)
+            except: pass
+        return # Salimos
 
     # ============================================================
     # 🦖 CEREBRO ANTIGUO: Lógica Manual (/tabla)
@@ -67,17 +80,14 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tabla_destino = user_tablas.get(user_id)
 
         if not tabla_destino:
-            await update.message.reply_text("Primero selecciona una tabla con /tabla …")
-            # Borramos el archivo para no llenar el disco
+            await update.message.reply_text("⚠️ No sé qué hacer con este archivo. Usa /tabla primero o sube un reporte conocido.")
             try: os.remove(ruta)
             except: pass
             return
 
         df = cargar_tabla(ruta)
 
-        # ============================================================
-        # CONFIRM PO (LEGACY - Solo si alguien fuerza la tabla manualmente)
-        # ============================================================
+        # CASO LEGACY: Confirm PO manual (si alguien insiste en usar /tabla confirm_po)
         if tabla_destino == "confirm_po":
             mapeo = {
                 "po": "po_number",
@@ -112,21 +122,19 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             df = df.dropna(how="all").reset_index(drop=True)
 
-            df = df.drop_duplicates(
-                subset=["po_number", "product", "vendor"], keep="last"
-            )
+            # Limpieza de duplicados básica
+            if "po_number" in df.columns:
+                df = df.drop_duplicates(subset=["po_number", "product", "vendor"], keep="last")
 
             resultado = insertar_dataframe(
                 tabla_destino,
                 df,
-                columna_unica="po_number,product,vendor",
+                columna_unica="po_number,product,vendor" if "po_number" in df.columns else None,
             )
-        # ============================================================
-        # GENERAL (proveedores, airlines, etc.)
-        # ============================================================
+            
+        # CASO GENERAL (Proveedores, Airlines, etc.)
         else:
             esquema = obtener_columnas_tabla(tabla_destino)
-
             mapa_db = {_norm_generico(col["nombre"]): col["nombre"] for col in esquema}
 
             df.columns = [str(c).strip() for c in df.columns]
@@ -149,7 +157,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             clave_unica = None
             if tabla_destino == "proveedores" and "codigo" in df.columns:
-                clave_unica = "codigo,proveedor,gerente"
+                clave_unica = "codigo"
                 df = df.drop_duplicates(subset=["codigo"], keep="last")
             elif tabla_destino == "airlines" and "cod" in df.columns:
                 clave_unica = "cod"
@@ -161,11 +169,11 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 columna_unica=clave_unica,
             )
 
-        await update.message.reply_text(f"✔️ {resultado}")
+        await update.message.reply_text(f"✔️ Carga manual exitosa: {resultado}")
 
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
+        await update.message.reply_text(f"❌ Error genérico: {e}")
     finally:
-        # Limpieza de cortesía
+        # Limpieza final
         try: os.remove(ruta)
         except: pass
