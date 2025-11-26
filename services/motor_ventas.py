@@ -6,15 +6,58 @@ from services.cliente_supabase import db_client, logger
 class GestorPrediccionVentas:
     """
     Motor de inteligencia comercial y materialización de ventas.
-    Conecta el RFM (Financiero) con las Reglas de Empaque (Logístico).
+    Conecta el RFM (Financiero), Reglas de Empaque (Logístico) y Cronograma (Tiempo).
     """
 
     def __init__(self):
         self.db = db_client
 
+    # --- FASE 3: EL CRONOGRAMA MAESTRO (NUEVO) ---
+    def buscar_oportunidades_del_dia(self) -> list:
+        """
+        Consulta qué clientes tienen la costumbre de pedir HOY.
+        Retorna una lista de oportunidades para el comando /rutina.
+        """
+        try:
+            # 1. ¿Qué día es hoy? (En Inglés: Monday, Tuesday...)
+            dia_actual = datetime.now().strftime('%A')
+            
+            logger.info(f"📅 Buscando oportunidades para: {dia_actual}")
+
+            # 2. Consulta a la Memoria (Packing Rules)
+            res = self.db.table("customer_packing_rules")\
+                .select("*")\
+                .eq("preferred_day", dia_actual)\
+                .execute()
+            
+            if not res.data:
+                return []
+
+            # 3. Refinamiento (Agrupar por cliente)
+            oportunidades = []
+            clientes_vistos = set()
+
+            for regla in res.data:
+                cliente = regla['customer_code']
+                if cliente not in clientes_vistos:
+                    oportunidades.append({
+                        "cliente": cliente,
+                        "producto_ejemplo": regla['product_name'],
+                        "total_productos": 1, 
+                        "caja_tipica": regla['box_type']
+                    })
+                    clientes_vistos.add(cliente)
+            
+            return oportunidades
+
+        except Exception as e:
+            logger.error(f"Error buscando oportunidades: {e}")
+            return []
+
+    # --- MÉTODOS EXISTENTES (Fase 1 y 2) ---
+
     def _obtener_perfil_cliente(self, codigo_cliente: str):
         try:
-            # 1. Resolver ID basado en Código
             res_id = self.db.table("customers")\
                 .select("id, name, code")\
                 .or_(f"code.eq.{codigo_cliente},customer_code.eq.{codigo_cliente}")\
@@ -26,7 +69,6 @@ class GestorPrediccionVentas:
             cliente_maestro = res_id.data[0]
             uuid_cliente = cliente_maestro['id']
 
-            # 2. Consultar Métricas RFM
             res_rfm = self.db.table("v_customer_rfm")\
                 .select("*")\
                 .eq("customer_id", uuid_cliente)\
@@ -39,11 +81,8 @@ class GestorPrediccionVentas:
             return None, str(e)
 
     def _obtener_regla_empaque(self, codigo_cliente: str, nombre_producto: str = ""):
-        """
-        Consulta la Memoria Logística (customer_packing_rules).
-        """
         try:
-            # 1. Intento Exacto: Cliente + Producto
+            # 1. Intento Exacto
             res = self.db.table("customer_packing_rules")\
                 .select("*")\
                 .eq("customer_code", codigo_cliente)\
@@ -51,10 +90,9 @@ class GestorPrediccionVentas:
                 .limit(1)\
                 .execute()
             
-            if res.data:
-                return res.data[0]
+            if res.data: return res.data[0]
 
-            # 2. Intento Genérico: Última regla usada
+            # 2. Intento Genérico
             res_gen = self.db.table("customer_packing_rules")\
                 .select("*")\
                 .eq("customer_code", codigo_cliente)\
@@ -62,16 +100,9 @@ class GestorPrediccionVentas:
                 .limit(1)\
                 .execute()
             
-            if res_gen.data:
-                return res_gen.data[0]
+            if res_gen.data: return res_gen.data[0]
             
-            # 3. Fallback
-            return {
-                "box_type": "QB",
-                "bunches_per_box": 10,
-                "stems_per_bunch": 25,
-                "mark_code": "Standard"
-            }
+            return {"box_type": "QB", "bunches_per_box": 10, "stems_per_bunch": 25, "mark_code": "Standard"}
         except Exception:
             return {"box_type": "QB", "bunches_per_box": 10, "stems_per_bunch": 25}
 
@@ -86,12 +117,10 @@ class GestorPrediccionVentas:
             if not perfil:
                 return None, {"error": f"El código '{codigo_cliente}' no existe."}
 
-            # Métricas
             dias_inactividad = perfil.get('days_since_last_order')
             ticket_promedio = float(perfil.get('avg_order_value') or 0.0)
             lifetime_orders = int(perfil.get('lifetime_orders') or 0)
 
-            # Lógica de Negocio
             if dias_inactividad is None:
                 estrategia = "PROSPECCION"
                 producto = "Mix de Muestras"
@@ -108,10 +137,8 @@ class GestorPrediccionVentas:
                 precio_sugerido = ticket_promedio
                 observacion = "Cliente saludable."
 
-            # --- CONEXIÓN CON LA MEMORIA LOGÍSTICA ---
             regla_empaque = self._obtener_regla_empaque(perfil.get('code'), producto)
 
-            # Respuesta Completa
             detalle_sugerencia = {
                 "cliente_nombre": perfil.get('name'),
                 "codigo_interno": perfil.get('code'),
@@ -119,7 +146,6 @@ class GestorPrediccionVentas:
                 "producto_objetivo": producto,
                 "precio_unitario": round(precio_sugerido, 2),
                 "justificacion_tecnica": observacion,
-                # Datos Logísticos Reales
                 "logistica": {
                     "tipo_caja": regla_empaque.get("box_type", "QB"),
                     "ramos_x_caja": regla_empaque.get("bunches_per_box", 10),
@@ -141,7 +167,6 @@ class GestorPrediccionVentas:
             return None, {"error": str(e)}
 
     def _registrar_auditoria(self, client_id: str, sugerencia: dict):
-        """Guarda en prediction_history. Maneja FKs rotas."""
         payload = {
             "client_id": client_id,
             "input_context": sugerencia["metricas_base"],
@@ -177,14 +202,9 @@ class GestorPrediccionVentas:
             return False
 
     def crear_orden_confirmada(self, datos_orden: dict) -> str:
-        """
-        Crea una orden estructurada en 'sales_orders' y 'sales_items'.
-        """
         try:
-            # 1. PO Number Único
             po_number = f"P{int(datetime.now().timestamp())}"
             
-            # 2. Cabecera
             cabecera = {
                 "po_number": po_number,
                 "vendor": datos_orden.get("vendor", "BM"),
@@ -204,7 +224,6 @@ class GestorPrediccionVentas:
             
             order_uuid = res_head.data[0]['id']
 
-            # 3. Ítem (Detalle con Logística Real)
             item = {
                 "order_id": order_uuid,
                 "customer_code": datos_orden["cliente_nombre"], 
@@ -215,7 +234,7 @@ class GestorPrediccionVentas:
                 "unit_price": float(datos_orden["precio_unitario"]),
                 "total_line_value": float(datos_orden["valor_total_pedido"]),
                 "notes": "Generado vía Bot",
-                "mark_code": datos_orden.get("marcacion", "") # Aquí guardamos la marca que aprendimos
+                "mark_code": datos_orden.get("marcacion", "")
             }
 
             self.db.table("sales_items").insert(item).execute()

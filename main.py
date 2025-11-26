@@ -13,7 +13,7 @@ from handlers.archivos import handle_file
 from handlers.tabla import set_tabla
 from handlers.tablageneral import tablageneral
 # Importamos las funciones del cerebro comercial
-from handlers.gestion_pedidos import comando_sugerir_pedido, procesar_callback_pedido, recibir_ajuste_precio
+from handlers.gestion_pedidos import comando_sugerir_pedido, procesar_callback_pedido, recibir_ajuste_precio, comando_rutina_diaria
 
 # Cargar variables del entorno
 load_dotenv()
@@ -86,6 +86,7 @@ if __name__ == "__main__":
 
     # --- 4. INTELIGENCIA COMERCIAL (NUEVO) ---
     app.add_handler(CommandHandler("sugerir", comando_sugerir_pedido))
+    app.add_handler(CommandHandler("rutina", comando_rutina_diaria))
     app.add_handler(CallbackQueryHandler(procesar_callback_pedido))
 
     # --- 5. IMPORTANTE: HANDLERS DE TEXTO ---

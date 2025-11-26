@@ -2,13 +2,52 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from services.motor_ventas import GestorPrediccionVentas
 from services.calculadora import calculadora 
+from datetime import datetime
 
+# Instanciamos el servicio de negocio
 gestor_ventas = GestorPrediccionVentas()
 
+# --- NUEVO: COMANDO RUTINA (Fase 3) ---
+async def comando_rutina_diaria(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Comando: /rutina
+    Busca qué clientes deberían comprar hoy.
+    """
+    await update.message.reply_text("📅 <b>Consultando el Cronograma Maestro...</b>", parse_mode="HTML")
+
+    oportunidades = gestor_ventas.buscar_oportunidades_del_dia()
+
+    if not oportunidades:
+        dia_hoy = datetime.now().strftime('%A')
+        await update.message.reply_text(
+            f"😴 <b>Todo tranquilo por hoy ({dia_hoy}).</b>\n"
+            f"No encontré Standing Orders programadas para este día.",
+            parse_mode="HTML"
+        )
+        return
+
+    keyboard = []
+    resumen_texto = f"⚡ <b>Oportunidades Detectadas para Hoy:</b>\n\n"
+
+    for op in oportunidades[:10]: 
+        cliente = op['cliente']
+        producto = op.get('producto_ejemplo', 'Producto Varios')
+        caja = op.get('caja_tipica', 'QB')
+        
+        resumen_texto += f"🔹 <b>{cliente}</b> (Suele pedir {caja})\n"
+        
+        # Botón mágico que simula escribir /sugerir CLIENTE
+        keyboard.append([
+            InlineKeyboardButton(f"🚀 Atender a {cliente}", callback_data=f"auto_{cliente}")
+        ])
+
+    resumen_texto += "\n<i>Selecciona un cliente para generar su orden:</i>"
+    
+    await update.message.reply_text(resumen_texto, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+# --- COMANDOS EXISTENTES (Fase 1 y 2) ---
+
 async def comando_sugerir_pedido(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Comando: /sugerir <CODIGO_CLIENTE>
-    """
     if not context.args:
         await update.message.reply_text(
             "⚠️ <b>Error de Sintaxis</b>\nPor favor ingrese el código del cliente.\nEjemplo: <code>/sugerir MEXT</code>",
@@ -25,9 +64,7 @@ async def comando_sugerir_pedido(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(f"❌ Error: {sugerencia.get('error')}")
         return
 
-    # Guardamos sugerencia completa en contexto
     context.user_data['sugerencia_actual'] = sugerencia
-    
     logistica = sugerencia.get('logistica', {})
     
     texto = (
@@ -59,7 +96,17 @@ async def procesar_callback_pedido(update: Update, context: ContextTypes.DEFAULT
     await query.answer() 
 
     data = query.data
-    accion, pred_id = data.split("_")
+
+    # --- ENRUTADOR FASE 3 ---
+    if data.startswith("auto_"):
+        cliente_code = data.split("_")[1]
+        context.args = [cliente_code] 
+        await comando_sugerir_pedido(update, context)
+        return
+
+    try:
+        accion, pred_id = data.split("_")
+    except: return
 
     if accion == "aprob":
         sugerencia = context.user_data.get('sugerencia_actual')
