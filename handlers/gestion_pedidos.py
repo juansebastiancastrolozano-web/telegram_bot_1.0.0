@@ -2,6 +2,8 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from services.motor_ventas import GestorPrediccionVentas
+# --- NUEVA IMPORTACIÓN ---
+from services.calculadora import calculadora 
 
 # Instanciamos el servicio de negocio
 gestor_ventas = GestorPrediccionVentas()
@@ -69,13 +71,42 @@ async def procesar_callback_pedido(update: Update, context: ContextTypes.DEFAULT
     accion, pred_id = data.split("_")
 
     if accion == "aprob":
-        # Aquí se integraría con el sistema de generación de PO real
+        # -------------------------------------------------------
+        # BLOQUE DE CÁLCULO MATEMÁTICO (SIMULACIÓN)
+        # -------------------------------------------------------
+        # En producción, estos datos vendrán de la DB o del contexto.
+        # Por ahora, "quemamos" los datos para probar la calculadora.
+        cantidad = 5
+        tipo_caja = "QB"
+        tallos_por_ramo = 25
+        ramos_en_full = 80 
+        precio_acordado = 0.45 
+
+        # Ejecutamos la matemática sagrada
+        resultado = calculadora.calcular_linea_pedido(
+            cantidad_cajas=cantidad,
+            tipo_caja=tipo_caja,
+            tallos_por_ramo=tallos_por_ramo,
+            ramos_por_caja_full=ramos_en_full,
+            precio_unitario=precio_acordado
+        )
+        
+        mensaje_final = (
+            f"✅ **Orden Confirmada y Calculada**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📦 **Empaque:** {resultado['meta_data']}\n"
+            f"🌹 **Total Tallos:** {resultado['total_tallos']}\n"
+            f"💰 **VALOR TOTAL: ${resultado['valor_total']} USD**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"_(Ref: {pred_id})_\n"
+            f"_Enviando a logística..._"
+        )
+
         await query.edit_message_text(
-            f"✅ **Orden Confirmada** (Ref: {pred_id})\n"
-            f"El pedido ha sido enviado a la cola de procesamiento logístico.",
+            mensaje_final,
             parse_mode="Markdown"
         )
-        # TODO: Trigger n8n webhook for PO generation
+        # TODO: Aquí insertaríamos en la tabla 'orders' real de Supabase
 
     elif accion == "ajust":
         # Guardamos el ID en el contexto del usuario para esperar su input numérico
@@ -97,8 +128,7 @@ async def recibir_ajuste_precio(update: Update, context: ContextTypes.DEFAULT_TY
     user_msg = update.message.text
     pred_id = context.user_data.get('prediccion_activa_id')
 
-    # Si no hay ID activo, ignoramos el mensaje (o lo maneja otro handler)
-    # Aquí no imprimimos nada para no ensuciar el log ni responder a mensajes normales
+    # Si no hay ID activo, ignoramos el mensaje
     if not pred_id:
         return 
 
@@ -106,7 +136,6 @@ async def recibir_ajuste_precio(update: Update, context: ContextTypes.DEFAULT_TY
 
     # Validación simple de tipo de dato
     try:
-        # Reemplazamos coma por punto para decimales latinos/europeos
         precio_real = float(texto_input.replace(",", "."))
     except ValueError:
         await update.message.reply_text("⚠️ Formato inválido. Por favor ingrese solo el número (ej. 0.45).")
