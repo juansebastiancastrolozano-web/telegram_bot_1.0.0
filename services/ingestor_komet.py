@@ -15,7 +15,7 @@ class IngestorKomet:
         try:
             # 1. Lectura Agnostic (CSV o Excel)
             if ruta_archivo.lower().endswith('.csv'):
-                # Intentamos detectar encoding, latin1 suele funcionar para excels viejos guardados como csv
+                # Intentamos detectar encoding
                 try:
                     df_raw = pd.read_csv(ruta_archivo, header=None, encoding='utf-8')
                 except:
@@ -47,8 +47,9 @@ class IngestorKomet:
             df = df.dropna(subset=['PO #'])
             
             # Eliminamos filas "Basura" (Leyendas, Totales, Explicaciones)
-            # Regla: Un PO real no suele tener espacios en blanco ni dos puntos (ej: "P083638" es válido, "B/T: Box" no lo es)
+            # Regla: Un PO real suele ser alfanumérico. Si contiene ":", probablemente es una leyenda.
             # Convertimos a string y filtramos lo que parezca ruido
+            df = df[~df['PO #'].astype(str).str.contains(':', na=False)]
             df = df[df['PO #'].astype(str).str.match(r'^[A-Za-z0-9-]+$')]
 
             return self._cargar_a_supabase_relacional(df)
@@ -156,8 +157,13 @@ class IngestorKomet:
         resumen += f"🌺 Ítems: {items_creados}\n"
         
         if errores:
-            errores_limpios = [e for e in errores if "SyncQueryRequestBuilder" not in e] # Ocultamos errores técnicos repetidos
+            # Ocultamos errores técnicos repetidos para no asustar al usuario
+            errores_limpios = [e for e in errores if "SyncQueryRequestBuilder" not in e] 
             if errores_limpios:
-                resumen += f"\n⚠️ <b>Alertas:</b> {len(errores_limpios)}"
+                resumen += f"\n⚠️ <b>Alertas ({len(errores_limpios)}):</b>\n"
+                resumen += "; ".join(errores_limpios[:3]) # Solo mostramos los primeros 3
         
         return resumen
+
+# --- ESTA LÍNEA ES OBLIGATORIA ---
+ingestor_komet = IngestorKomet()
