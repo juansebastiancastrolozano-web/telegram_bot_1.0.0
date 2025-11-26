@@ -6,13 +6,13 @@ from services.cliente_supabase import db_client, logger
 class GestorPrediccionVentas:
     """
     Motor de inteligencia comercial y materialización de ventas.
+    Conecta el RFM (Financiero) con las Reglas de Empaque (Logístico).
     """
 
     def __init__(self):
         self.db = db_client
 
     def _obtener_perfil_cliente(self, codigo_cliente: str):
-        """Método auxiliar para resolver la identidad del cliente."""
         try:
             # 1. Resolver ID basado en Código
             res_id = self.db.table("customers")\
@@ -37,6 +37,43 @@ class GestorPrediccionVentas:
 
         except Exception as e:
             return None, str(e)
+
+    def _obtener_regla_empaque(self, codigo_cliente: str, nombre_producto: str = ""):
+        """
+        Consulta la Memoria Logística (customer_packing_rules).
+        """
+        try:
+            # 1. Intento Exacto: Cliente + Producto
+            res = self.db.table("customer_packing_rules")\
+                .select("*")\
+                .eq("customer_code", codigo_cliente)\
+                .ilike("product_name", f"%{nombre_producto.split(' ')[0]}%")\
+                .limit(1)\
+                .execute()
+            
+            if res.data:
+                return res.data[0]
+
+            # 2. Intento Genérico: Última regla usada
+            res_gen = self.db.table("customer_packing_rules")\
+                .select("*")\
+                .eq("customer_code", codigo_cliente)\
+                .order("last_updated", desc=True)\
+                .limit(1)\
+                .execute()
+            
+            if res_gen.data:
+                return res_gen.data[0]
+            
+            # 3. Fallback
+            return {
+                "box_type": "QB",
+                "bunches_per_box": 10,
+                "stems_per_bunch": 25,
+                "mark_code": "Standard"
+            }
+        except Exception:
+            return {"box_type": "QB", "bunches_per_box": 10, "stems_per_bunch": 25}
 
     def generar_sugerencia_pedido(self, codigo_cliente: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         try:
@@ -71,7 +108,10 @@ class GestorPrediccionVentas:
                 precio_sugerido = ticket_promedio
                 observacion = "Cliente saludable."
 
-            # Respuesta
+            # --- CONEXIÓN CON LA MEMORIA LOGÍSTICA ---
+            regla_empaque = self._obtener_regla_empaque(perfil.get('code'), producto)
+
+            # Respuesta Completa
             detalle_sugerencia = {
                 "cliente_nombre": perfil.get('name'),
                 "codigo_interno": perfil.get('code'),
@@ -79,6 +119,14 @@ class GestorPrediccionVentas:
                 "producto_objetivo": producto,
                 "precio_unitario": round(precio_sugerido, 2),
                 "justificacion_tecnica": observacion,
+                # Datos Logísticos Reales
+                "logistica": {
+                    "tipo_caja": regla_empaque.get("box_type", "QB"),
+                    "ramos_x_caja": regla_empaque.get("bunches_per_box", 10),
+                    "tallos_x_ramo": regla_empaque.get("stems_per_bunch", 25),
+                    "marcacion": regla_empaque.get("mark_code", "Standard"),
+                    "upc": regla_empaque.get("upc_code", "")
+                },
                 "metricas_base": {
                     "dias_sin_compra": dias_inactividad if dias_inactividad is not None else "N/A",
                     "promedio_historico": ticket_promedio
@@ -114,7 +162,6 @@ class GestorPrediccionVentas:
             return f"TEMP-{int(datetime.now().timestamp())}"
 
     def registrar_ajuste_usuario(self, prediction_id: str, precio_real: float) -> bool:
-        """Registra corrección humana."""
         try:
             if str(prediction_id).startswith("TEMP-"): return False
             payload = {
@@ -129,30 +176,26 @@ class GestorPrediccionVentas:
             logger.error(f"Error ajuste: {e}")
             return False
 
-    # --- VERSIÓN DEFINITIVA: ESTRUCTURA RELACIONAL (HEADER + ITEMS) ---
     def crear_orden_confirmada(self, datos_orden: dict) -> str:
         """
         Crea una orden estructurada en 'sales_orders' y 'sales_items'.
         """
         try:
-            # 1. Generamos PO Number Único
+            # 1. PO Number Único
             po_number = f"P{int(datetime.now().timestamp())}"
             
-            # 2. Preparar Cabecera (La Logística)
+            # 2. Cabecera
             cabecera = {
                 "po_number": po_number,
                 "vendor": datos_orden.get("vendor", "BM"),
                 "ship_date": datetime.now().strftime("%Y-%m-%d"),
                 "origin": "BOG",
                 "status": "Confirmed",
-                "source_file": "Bot_Telegram_V1",
+                "source_file": "Bot_Telegram_V2_Smart",
                 "total_boxes": int(datos_orden["cajas"]),
                 "total_value": float(datos_orden["valor_total_pedido"])
             }
 
-            # 3. Insertar Cabecera
-            # Usamos insert().select() porque en tablas nuevas con RLS default suele funcionar bien
-            # Si falla, prueba quitar .select() como hicimos antes
             res_head = self.db.table("sales_orders").insert(cabecera).execute()
             
             if not res_head.data:
@@ -161,27 +204,26 @@ class GestorPrediccionVentas:
             
             order_uuid = res_head.data[0]['id']
 
-            # 4. Preparar Ítem (El Producto Específico)
+            # 3. Ítem (Detalle con Logística Real)
             item = {
                 "order_id": order_uuid,
-                "customer_code": datos_orden["cliente_nombre"], # El cliente va en el item
+                "customer_code": datos_orden["cliente_nombre"], 
                 "product_name": datos_orden["producto_descripcion"],
                 "box_type": datos_orden["tipo_caja"],
                 "boxes": int(datos_orden["cajas"]),
                 "total_units": int(datos_orden["total_tallos"]),
                 "unit_price": float(datos_orden["precio_unitario"]),
                 "total_line_value": float(datos_orden["valor_total_pedido"]),
-                "notes": "Generado vía Bot"
+                "notes": "Generado vía Bot",
+                "mark_code": datos_orden.get("marcacion", "") # Aquí guardamos la marca que aprendimos
             }
 
-            # 5. Insertar Ítem
             self.db.table("sales_items").insert(item).execute()
             
             logger.info(f"✅ Orden Relacional Creada: {po_number}")
             return po_number
 
         except Exception as e:
-            # Imprimir error real en consola para debug inmediato
             print(f"🔴 ERROR DB: {e}")
             logger.error(f"Error fatal creando Orden Relacional: {e}")
             return None
