@@ -9,8 +9,8 @@ logger = logging.getLogger(__name__)
 
 class IngestorOPBASE:
     """
-    El Historiador Inteligente (Versión Enriquecida).
-    Fuerza el uso de IA para extraer Variedad y Color, no solo Tipo de Flor.
+    El Historiador Inteligente (Versión Mapeo Limpio).
+    Corrige el error de intentar insertar 'po_number' en los items.
     """
 
     def _limpiar_numero(self, valor):
@@ -42,7 +42,7 @@ class IngestorOPBASE:
                 else:
                     df_raw = pd.read_excel(ruta_archivo, sheet_name='OPBASE', header=None) 
             except ValueError:
-                return "⚠️ No encontré la hoja 'OPBASE'. Verifique el nombre de la pestaña."
+                return "⚠️ No encontré la hoja 'OPBASE'."
 
             # 2. ESCÁNER DE ANCLA
             indice_header = None
@@ -69,10 +69,9 @@ class IngestorOPBASE:
             errores_log = []
             productos_limpiados_ia = 0
 
-            # 4. MAPEO
+            # 4. MAPEO (LIMPIO DE CAMPOS DE CABECERA)
+            # Quitamos po_number y status porque van en sales_orders
             mapeo_columnas = {
-                "po_number": ["PO#", "PO"],
-                "status": ["Status"],
                 "product_code": ["Code"],
                 "boxes": ["Quantity", "Cajas"],
                 "box_type": ["UOM"],
@@ -90,8 +89,8 @@ class IngestorOPBASE:
                 "sleeve_type": ["Carton //Sleeve", "Sleeve"],
                 "stems_per_bunch": ["tallos"],
                 "total_units": ["total tallos"],
-                "awb": ["awb", "AWB"],
-                "hawb": ["hija", "HAWB"],
+                "awb": ["awb", "AWB"],     # A veces es útil tenerlo en el item por referencia
+                "hawb": ["hija", "HAWB"],   # A veces es útil tenerlo en el item por referencia
                 "unit_price_stems": ["precio unt st"],
                 "stems_per_box": ["tallos por cja"],
                 "order_kind": ["tipo de orden"],
@@ -122,13 +121,14 @@ class IngestorOPBASE:
                 try:
                     primera = grupo.iloc[0]
                     
+                    # HEADER DATA
                     col_fly = next((c for c in df.columns if 'fly' in c.lower()), None)
                     col_finca = next((c for c in df.columns if 'finca' in c.lower()), None)
-                    col_awb = next((c for c in df.columns if 'awb' in c.lower()), None)
-                    col_hija = next((c for c in df.columns if 'hija' in c.lower()), None)
+                    col_awb_head = next((c for c in df.columns if 'awb' in c.lower()), None)
+                    col_hija_head = next((c for c in df.columns if 'hija' in c.lower()), None)
                     col_qty = next((c for c in df.columns if 'quan' in c.lower()), None)
                     col_total = next((c for c in df.columns if 'venta total' in c.lower()), None)
-                    col_po = next((c for c in df.columns if 'po' in c.lower()), 'PO#') 
+                    col_po = next((c for c in df.columns if 'po' in c.lower()), 'PO#')
                     
                     total_cajas = int(sum([self._limpiar_numero(x) for x in grupo[col_qty]])) if col_qty else 0
                     total_valor = float(sum([self._limpiar_numero(x) for x in grupo[col_total]])) if col_total else 0.0
@@ -144,8 +144,8 @@ class IngestorOPBASE:
                         "customer_name": str(primera.get(col_cust, 'UNKNOWN')),
                         "ship_date": self._limpiar_fecha(primera.get(col_fly)),
                         "flight_date": self._limpiar_fecha(primera.get(col_fly)),
-                        "awb": str(primera.get(col_awb, '')),
-                        "hawb": str(primera.get(col_hija, '')), 
+                        "awb": str(primera.get(col_awb_head, '')),
+                        "hawb": str(primera.get(col_hija_head, '')), 
                         "origin": "BOG",
                         "status": "Archived",
                         "is_historical": True,
@@ -154,13 +154,17 @@ class IngestorOPBASE:
                         "total_value": total_valor
                     }
                     
+                    # 1. Crear Cabecera
                     db_client.table("sales_orders").upsert(cabecera, on_conflict="po_number").execute()
                     
+                    # 2. Obtener ID
                     res_search = db_client.table("sales_orders").select("id").eq("po_number", po_real).execute()
-                    if not res_search.data: continue
+                    if not res_search.data: 
+                        errores_log.append(f"No ID para {po_real}")
+                        continue
                     order_id = res_search.data[0]['id']
 
-                    # --- ITEMS ---
+                    # 3. Preparar Items
                     items_batch = []
                     col_desc = next((c for c in df.columns if 'desc' in c.lower()), 'Descrip')
                     col_flor = next((c for c in df.columns if 'flor' in c.lower()), 'flor')
@@ -173,24 +177,17 @@ class IngestorOPBASE:
                         item["product_name"] = nombre_prod
                         item["flower_type"] = tipo_flor
 
-                        # --- MODIFICACIÓN CRÍTICA PARA ACTIVAR IA ---
-                        # Antes: if (not tipo_flor...)  <-- Esto lo frenaba si ya tenía flor
-                        # Ahora: Siempre intenta enriquecer si estamos en los primeros 50 registros
-                        if registros_procesados < 50: 
-                            # Llamada a GPT
+                        # IA ENRIQUECIMIENTO
+                        if (not tipo_flor or len(tipo_flor) < 3) and registros_procesados < 50: 
                             datos_ia = analizar_texto_con_ia(nombre_prod, "producto")
-                            
                             if datos_ia:
-                                # Solo sobrescribimos si GPT nos da algo mejor o nuevo
                                 if datos_ia.get("variety"): item["variety"] = datos_ia.get("variety")
                                 if datos_ia.get("color"): item["color"] = datos_ia.get("color")
                                 if datos_ia.get("grade"): item["grade"] = datos_ia.get("grade")
-                                # Si no teníamos tipo de flor, usamos el de GPT
                                 if not item["flower_type"]: item["flower_type"] = datos_ia.get("flower_type")
-                                
                                 productos_limpiados_ia += 1
 
-                        # Mapeo normal
+                        # MAPEO CAMPOS
                         for campo_sql, posibles in mapeo_columnas.items():
                             val_final = None
                             for nombre_excel in posibles:
@@ -208,13 +205,14 @@ class IngestorOPBASE:
 
                         items_batch.append(item)
 
+                    # 4. Inserción Items
                     if items_batch:
                         db_client.table("sales_items").delete().eq("order_id", order_id).execute()
                         db_client.table("sales_items").insert(items_batch).execute()
                         registros_procesados += len(items_batch)
 
                 except Exception as e:
-                    errores_log.append(f"Fallo en Invoice {invoice_num}: {str(e)}")
+                    errores_log.append(f"Fallo Invoice {invoice_num}: {str(e)}")
                     continue
 
             msg_error = ""
