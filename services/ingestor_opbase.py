@@ -3,43 +3,67 @@ import numpy as np
 import logging
 from datetime import datetime
 from services.cliente_supabase import db_client
-from services.ai_helper import analizar_texto_con_ia # <--- EL NUEVO CEREBRO
+from services.ai_helper import analizar_texto_con_ia
 
 logger = logging.getLogger(__name__)
 
 class IngestorOPBASE:
     """
-    El Bibliotecario Supremo + IA.
-    Ingesta OPBASE y usa GPT para limpiar datos botánicos.
+    El Historiador Inteligente.
+    1. Busca la tabla real (ignora basura inicial).
+    2. Mapea columnas exóticas a SQL.
+    3. Usa IA para limpiar productos si es necesario.
     """
 
     def procesar_memoria_historica(self, ruta_archivo: str):
         try:
-            # 1. Lectura
+            # 1. LECTURA CRUDA (Sin asumir headers)
             try:
                 if ruta_archivo.endswith('.csv'):
-                    df = pd.read_csv(ruta_archivo)
+                    df_raw = pd.read_csv(ruta_archivo, header=None)
                 else:
-                    df = pd.read_excel(ruta_archivo, sheet_name='OPBASE', header=0) 
+                    df_raw = pd.read_excel(ruta_archivo, sheet_name='OPBASE', header=None) 
             except ValueError:
-                return "⚠️ No encontré la hoja 'OPBASE'. ¿Es el archivo correcto?"
+                return "⚠️ No encontré la hoja 'OPBASE'. Verifique el nombre de la pestaña."
 
+            # 2. ESCÁNER DE ANCLA (Buscamos la fila de títulos)
+            indice_header = None
+            for i, row in df_raw.iterrows():
+                # Convertimos fila a texto minúscula
+                row_str = " ".join([str(x) for x in row.values]).lower()
+                
+                # Huella digital de OPBASE: Debe tener 'customer', 'code' y 'descrip'
+                if "customer" in row_str and "code" in row_str and "descrip" in row_str:
+                    indice_header = i
+                    break
+            
+            if indice_header is None:
+                return "❌ No encontré la cabecera en OPBASE. (Faltan columnas Customer/Code/Descrip)"
+
+            # 3. RECONSTRUCCIÓN DE LA TABLA
+            df = df_raw.iloc[indice_header + 1:].copy()
+            df.columns = df_raw.iloc[indice_header].values
+            
+            # Limpieza de nombres de columnas
             df.columns = [str(c).strip() for c in df.columns]
             
+            # Validamos que exista la columna Customer ahora sí
             col_cust = next((c for c in df.columns if 'cust' in c.lower()), None)
-            if col_cust: df = df.dropna(subset=[col_cust])
+            if not col_cust:
+                return "❌ Error: Encontré la tabla pero no la columna 'Customer'."
+
+            df = df.dropna(subset=[col_cust]) # Borrar filas sin cliente
             
             registros_procesados = 0
             items_batch = []
             errores = 0
             productos_limpiados_ia = 0
 
-            # Mapeo de columnas (Excel -> SQL)
+            # 4. MAPEO INTELIGENTE
             mapeo_columnas = {
                 "po_number": ["PO#", "PO"],
                 "status": ["Status"],
                 "product_code": ["Code"],
-                # "product_name" lo manejamos manual para la IA
                 "boxes": ["Quantity", "Cajas"],
                 "box_type": ["UOM"],
                 "fly_date": ["FlyDate"],
@@ -62,7 +86,6 @@ class IngestorOPBASE:
                 "unit_price_stems": ["precio unt st"],
                 "stems_per_box": ["tallos por cja"],
                 "order_kind": ["tipo de orden"],
-                # "flower_type" lo intentamos sacar con IA si falta
                 "udv": ["UDV"],
                 "pcuc": ["PCUC"],
                 "vc": ["vc"],
@@ -82,15 +105,19 @@ class IngestorOPBASE:
                 "customer_code": ["Customer", "Cust"]
             }
 
-            col_invoice = next((c for c in df.columns if 'invoice' in c.lower()), 'INVOICE')
-            if col_invoice not in df.columns: 
+            # Buscar columna pivote para agrupar (Invoice o PO)
+            col_invoice = next((c for c in df.columns if 'invoice' in c.lower()), None)
+            if not col_invoice: 
                  col_invoice = next((c for c in df.columns if 'po' in c.lower() and '#' in c.lower()), 'PO#')
 
             grupos = df.groupby(col_invoice)
 
+            # 5. PROCESAMIENTO DE GRUPOS
             for invoice_num, grupo in grupos:
                 try:
                     primera = grupo.iloc[0]
+                    
+                    # -- Cabecera --
                     col_fly = next((c for c in df.columns if 'fly' in c.lower()), 'FlyDate')
                     col_finca = next((c for c in df.columns if 'finca' in c.lower()), 'finca')
                     col_awb = next((c for c in df.columns if 'awb' in c.lower()), 'awb')
@@ -107,7 +134,7 @@ class IngestorOPBASE:
                     total_valor = float(pd.to_numeric(grupo[col_total], errors='coerce').sum())
 
                     cabecera = {
-                        "po_number": f"HIST-{invoice_num}",
+                        "po_number": f"HIST-{invoice_num}", 
                         "invoice_number": str(invoice_num),
                         "vendor": str(primera.get(col_finca, 'VARIOUS')),
                         "customer_name": str(primera.get(col_cust, 'UNKNOWN')),
@@ -123,26 +150,33 @@ class IngestorOPBASE:
                         "total_value": total_valor
                     }
                     
-                    res_head = db_client.table("sales_orders").upsert(cabecera, on_conflict="po_number").select().execute()
-                    if not res_head.data: continue
-                    order_id = res_head.data[0]['id']
+                    # Upsert Cabecera
+                    res_head = db_client.table("sales_orders").upsert(cabecera, on_conflict="po_number").execute()
+                    # Supabase suele devolver data, si no, buscamos el ID
+                    if res_head.data:
+                        order_id = res_head.data[0]['id']
+                    else:
+                        # Fallback: buscar el ID si el upsert no devolvió data
+                        res_search = db_client.table("sales_orders").select("id").eq("po_number", cabecera["po_number"]).execute()
+                        if res_search.data: order_id = res_search.data[0]['id']
+                        else: continue
 
                     col_desc = next((c for c in df.columns if 'desc' in c.lower()), 'Descrip')
                     col_flor = next((c for c in df.columns if 'flor' in c.lower()), 'flor')
 
+                    # -- Items --
                     for _, row in grupo.iterrows():
                         item = {"order_id": order_id}
                         
-                        # --- MAGIA OPENAI ---
+                        # IA Limpieza
                         nombre_original = str(row.get(col_desc, ''))
                         tipo_flor_excel = str(row.get(col_flor, ''))
                         
                         item["product_name"] = nombre_original
                         item["flower_type"] = tipo_flor_excel
 
-                        # Usamos IA solo si falta info clave o el nombre es complejo
-                        # Y limitamos para no gastar todo el dinero en una prueba (Quita la condición 'registros_procesados < 50' para full power)
-                        if (not tipo_flor_excel or len(tipo_flor_excel) < 3) and registros_procesados < 50: 
+                        if (not tipo_flor_excel or len(tipo_flor_excel) < 3) and registros_procesados < 20: 
+                            # Limite de 20 para prueba rápida de IA
                             datos_ia = analizar_texto_con_ia(nombre_original, "producto")
                             if datos_ia:
                                 item["variety"] = datos_ia.get("variety")
@@ -152,7 +186,7 @@ class IngestorOPBASE:
                                     item["flower_type"] = datos_ia.get("flower_type")
                                 productos_limpiados_ia += 1
 
-                        # Mapeo Restante
+                        # Mapeo Columnas
                         for campo_sql, posibles_nombres_excel in mapeo_columnas.items():
                             valor = None
                             for nombre_excel in posibles_nombres_excel:
@@ -164,7 +198,7 @@ class IngestorOPBASE:
                                         if campo_sql in ['boxes', 'total_units', 'stems_per_bunch', 'bunches_per_box']:
                                             try: valor = int(float(raw_val))
                                             except: valor = 0
-                                        elif campo_sql in ['sales_price', 'purchase_price', 'total_sales_value', 'credits']:
+                                        elif campo_sql in ['sales_price', 'purchase_price', 'total_sales_value', 'credits', 'pcuc', 'vc', 'pr', 'factor_1_25']:
                                             try: valor = float(raw_val)
                                             except: valor = 0.0
                                         else:
@@ -179,6 +213,7 @@ class IngestorOPBASE:
                     errores += 1
                     continue
 
+            # Inserción por lotes
             if items_batch:
                 chunk_size = 100
                 for i in range(0, len(items_batch), chunk_size):
