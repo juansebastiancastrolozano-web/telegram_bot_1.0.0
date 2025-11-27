@@ -9,8 +9,8 @@ logger = logging.getLogger(__name__)
 
 class IngestorOPBASE:
     """
-    El Historiador Inteligente (Versión Blindada).
-    Maneja formatos de moneda latinos (1.000,00), fechas rebeldes y errores de mapeo.
+    El Historiador Inteligente (Versión Blindada v2).
+    Corrige el error de 'select' en upsert y maneja la ingesta masiva.
     """
 
     def _limpiar_numero(self, valor):
@@ -19,53 +19,40 @@ class IngestorOPBASE:
         s = str(valor).strip()
         if not s: return 0.0
         
-        # Quitamos basura
         s = s.replace('$', '').replace(' ', '')
         
-        # Detectar formato latino (1.000,00) vs gringo (1,000.00)
-        # Si hay coma y punto, asumimos que el punto es miles y la coma decimal
+        # Lógica de decimales latinos vs gringos
         if ',' in s and '.' in s:
-            s = s.replace('.', '') # Quitar punto de miles
-            s = s.replace(',', '.') # Cambiar coma a punto decimal
+            s = s.replace('.', '').replace(',', '.')
         elif ',' in s:
-            s = s.replace(',', '.') # Caso simple "0,36" -> "0.36"
+            s = s.replace(',', '.')
             
-        try:
-            return float(s)
-        except:
-            return 0.0
+        try: return float(s)
+        except: return 0.0
 
     def _limpiar_fecha(self, valor):
-        """Intenta parsear fechas en varios formatos."""
         if pd.isna(valor): return datetime.now().strftime('%Y-%m-%d')
         s = str(valor).strip()
         try:
-            # Intentamos formatos comunes
-            for fmt in ('%d/%m/%Y', '%Y-%m-%d', '%m/%d/%Y', '%d-%m-%Y'):
-                try:
-                    return datetime.strptime(s, fmt).strftime('%Y-%m-%d')
-                except: continue
-            # Si es timestamp de pandas
-            return pd.to_datetime(valor).strftime('%Y-%m-%d')
+            return pd.to_datetime(s).strftime('%Y-%m-%d')
         except:
             return datetime.now().strftime('%Y-%m-%d')
 
     def procesar_memoria_historica(self, ruta_archivo: str):
         try:
-            # 1. LECTURA CRUDA
+            # 1. LECTURA
             try:
                 if ruta_archivo.endswith('.csv'):
                     df_raw = pd.read_csv(ruta_archivo, header=None)
                 else:
                     df_raw = pd.read_excel(ruta_archivo, sheet_name='OPBASE', header=None) 
             except ValueError:
-                return "⚠️ No encontré la hoja 'OPBASE'. Verifique el nombre de la pestaña."
+                return "⚠️ No encontré la hoja 'OPBASE'."
 
             # 2. ESCÁNER DE ANCLA
             indice_header = None
             for i, row in df_raw.iterrows():
                 row_str = " ".join([str(x) for x in row.values]).lower()
-                # Huella digital más flexible
                 if "customer" in row_str and "code" in row_str:
                     indice_header = i
                     break
@@ -78,14 +65,13 @@ class IngestorOPBASE:
             df.columns = df_raw.iloc[indice_header].values
             df.columns = [str(c).strip() for c in df.columns]
             
-            # Buscar columna Customer con variantes
             col_cust = next((c for c in df.columns if 'cust' in c.lower()), None)
-            if not col_cust: return "❌ Error: No encontré columna Customer."
+            if not col_cust: return "❌ Error: Sin columna Customer."
 
             df = df.dropna(subset=[col_cust])
             
             registros_procesados = 0
-            errores_log = [] # Lista para guardar errores específicos
+            errores_log = []
             productos_limpiados_ia = 0
 
             # 4. MAPEO
@@ -95,7 +81,6 @@ class IngestorOPBASE:
                 "product_code": ["Code"],
                 "boxes": ["Quantity", "Cajas"],
                 "box_type": ["UOM"],
-                # "fly_date": Manual
                 "sales_price": ["precio", "PRECIO VENTA"],
                 "purchase_price": ["PreciocOMPRA", "Precio Compra"],
                 "bunches_per_box": ["Qty/Box ramos por caja", "Qty/Box"],
@@ -125,7 +110,6 @@ class IngestorOPBASE:
                 "po_consecutive": ["po# consec"],
                 "valor_t": ["VALOR T"],
                 "total_sales_value": ["venta total"],
-                # "invoice_number": Manual
                 "farm_invoice": ["fact finca"],
                 "consecutive": ["CONSEQ"],
                 "credits": ["CREDITOS"],
@@ -134,7 +118,6 @@ class IngestorOPBASE:
                 "customer_code": ["Customer", "Cust"]
             }
 
-            # Buscar columna pivote (Invoice)
             col_invoice = next((c for c in df.columns if 'invoice' in c.lower()), None)
             if not col_invoice: col_invoice = next((c for c in df.columns if 'po' in c.lower() and '#' in c.lower()), 'PO#')
 
@@ -144,21 +127,21 @@ class IngestorOPBASE:
                 try:
                     primera = grupo.iloc[0]
                     
-                    # Columnas clave cabecera
                     col_fly = next((c for c in df.columns if 'fly' in c.lower()), None)
                     col_finca = next((c for c in df.columns if 'finca' in c.lower()), None)
                     col_awb = next((c for c in df.columns if 'awb' in c.lower()), None)
                     col_hija = next((c for c in df.columns if 'hija' in c.lower()), None)
-
                     col_qty = next((c for c in df.columns if 'quan' in c.lower()), None)
                     col_total = next((c for c in df.columns if 'venta total' in c.lower()), None)
                     
-                    # Totales calculados
                     total_cajas = int(sum([self._limpiar_numero(x) for x in grupo[col_qty]])) if col_qty else 0
                     total_valor = float(sum([self._limpiar_numero(x) for x in grupo[col_total]])) if col_total else 0.0
 
+                    # Prefijo HIST para no chocar con POs vivas
+                    po_number_val = f"HIST-{invoice_num}"
+
                     cabecera = {
-                        "po_number": f"HIST-{invoice_num}", 
+                        "po_number": po_number_val, 
                         "invoice_number": str(invoice_num),
                         "vendor": str(primera.get(col_finca, 'VARIOUS')),
                         "customer_name": str(primera.get(col_cust, 'UNKNOWN')),
@@ -174,15 +157,17 @@ class IngestorOPBASE:
                         "total_value": total_valor
                     }
                     
-                    res_head = db_client.table("sales_orders").upsert(
-                        cabecera, on_conflict="po_number"
-                    ).select().execute()
+                    # --- CORRECCIÓN: UPSERT SIN SELECT ---
+                    db_client.table("sales_orders").upsert(cabecera, on_conflict="po_number").execute()
                     
-                    if not res_head.data: 
-                        errores_log.append(f"Fallo cabecera {invoice_num}")
+                    # Recuperar ID (Doble Check)
+                    res_search = db_client.table("sales_orders").select("id").eq("po_number", po_number_val).execute()
+                    
+                    if not res_search.data:
+                        errores_log.append(f"No se pudo crear cabecera {invoice_num}")
                         continue
                         
-                    order_id = res_head.data[0]['id']
+                    order_id = res_search.data[0]['id']
 
                     # --- ITEMS ---
                     items_batch = []
@@ -198,8 +183,7 @@ class IngestorOPBASE:
                         item["product_name"] = nombre_prod
                         item["flower_type"] = tipo_flor
 
-                        # Limite de IA
-                        if (not tipo_flor or len(tipo_flor) < 3) and registros_procesados < 15: 
+                        if (not tipo_flor or len(tipo_flor) < 3) and registros_procesados < 10: 
                             datos_ia = analizar_texto_con_ia(nombre_prod, "producto")
                             if datos_ia:
                                 item["variety"] = datos_ia.get("variety")
@@ -209,21 +193,19 @@ class IngestorOPBASE:
                                     item["flower_type"] = datos_ia.get("flower_type")
                                 productos_limpiados_ia += 1
 
-                        # Mapeo Dinámico y Sanitización
+                        # Mapeo
                         for campo_sql, posibles in mapeo_columnas.items():
                             val_final = None
                             for nombre_excel in posibles:
                                 if nombre_excel in df.columns:
                                     raw = row[nombre_excel]
-                                    # Si el campo SQL es numérico, limpiamos
                                     if campo_sql in ['boxes', 'total_units', 'stems_per_bunch', 'bunches_per_box', 'stems_per_box']:
                                         val_final = int(self._limpiar_numero(raw))
                                     elif campo_sql in ['sales_price', 'purchase_price', 'total_sales_value', 'credits', 'pcuc', 'vc', 'pr', 'factor_1_25', 'valor_t', 'suggested_price', 'unit_price_stems', 'cash_payment', 'cash_purchase']:
                                         val_final = float(self._limpiar_numero(raw))
                                     else:
-                                        # Texto
                                         if pd.notna(raw): val_final = str(raw)
-                                    break # Encontrado
+                                    break
                             
                             if val_final is not None:
                                 item[campo_sql] = val_final
@@ -231,12 +213,13 @@ class IngestorOPBASE:
                         items_batch.append(item)
 
                     if items_batch:
+                        # Limpieza previa para evitar duplicados al re-subir
                         db_client.table("sales_items").delete().eq("order_id", order_id).execute()
                         db_client.table("sales_items").insert(items_batch).execute()
                         registros_procesados += len(items_batch)
 
                 except Exception as e:
-                    errores_log.append(f"Error en Invoice {invoice_num}: {str(e)}")
+                    errores_log.append(f"Fallo en Invoice {invoice_num}: {str(e)}")
                     continue
 
             msg_error = ""
@@ -247,7 +230,7 @@ class IngestorOPBASE:
                 f"🏛️ **Carga Histórica Finalizada**\n"
                 f"📄 Facturas: {len(grupos)}\n"
                 f"💾 Items Guardados: {registros_procesados}\n"
-                f"🧠 IA Usada: {productos_limpiados_ia} veces{msg_error}"
+                f"🧠 IA Usada: {productos_limpiados_ia}{msg_error}"
             )
 
         except Exception as e:
