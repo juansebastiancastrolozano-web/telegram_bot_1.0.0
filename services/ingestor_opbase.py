@@ -9,7 +9,8 @@ logger = logging.getLogger(__name__)
 
 class IngestorOPBASE:
     """
-    El Historiador Inteligente (Versión Corregida - Mapeo Limpio).
+    El Historiador Inteligente (Versión Enriquecida).
+    Fuerza el uso de IA para extraer Variedad y Color, no solo Tipo de Flor.
     """
 
     def _limpiar_numero(self, valor):
@@ -41,7 +42,7 @@ class IngestorOPBASE:
                 else:
                     df_raw = pd.read_excel(ruta_archivo, sheet_name='OPBASE', header=None) 
             except ValueError:
-                return "⚠️ No encontré la hoja 'OPBASE'."
+                return "⚠️ No encontré la hoja 'OPBASE'. Verifique el nombre de la pestaña."
 
             # 2. ESCÁNER DE ANCLA
             indice_header = None
@@ -68,9 +69,10 @@ class IngestorOPBASE:
             errores_log = []
             productos_limpiados_ia = 0
 
-            # 4. MAPEO (SOLO COLUMNAS QUE EXISTEN EN SALES_ITEMS)
-            # Quitamos po_number, status, awb, hawb porque van en sales_orders
+            # 4. MAPEO
             mapeo_columnas = {
+                "po_number": ["PO#", "PO"],
+                "status": ["Status"],
                 "product_code": ["Code"],
                 "boxes": ["Quantity", "Cajas"],
                 "box_type": ["UOM"],
@@ -88,6 +90,8 @@ class IngestorOPBASE:
                 "sleeve_type": ["Carton //Sleeve", "Sleeve"],
                 "stems_per_bunch": ["tallos"],
                 "total_units": ["total tallos"],
+                "awb": ["awb", "AWB"],
+                "hawb": ["hija", "HAWB"],
                 "unit_price_stems": ["precio unt st"],
                 "stems_per_box": ["tallos por cja"],
                 "order_kind": ["tipo de orden"],
@@ -118,19 +122,17 @@ class IngestorOPBASE:
                 try:
                     primera = grupo.iloc[0]
                     
-                    # HEADER DATA
                     col_fly = next((c for c in df.columns if 'fly' in c.lower()), None)
                     col_finca = next((c for c in df.columns if 'finca' in c.lower()), None)
                     col_awb = next((c for c in df.columns if 'awb' in c.lower()), None)
                     col_hija = next((c for c in df.columns if 'hija' in c.lower()), None)
                     col_qty = next((c for c in df.columns if 'quan' in c.lower()), None)
                     col_total = next((c for c in df.columns if 'venta total' in c.lower()), None)
-                    col_po = next((c for c in df.columns if 'po' in c.lower()), 'PO#') # PO Real
+                    col_po = next((c for c in df.columns if 'po' in c.lower()), 'PO#') 
                     
                     total_cajas = int(sum([self._limpiar_numero(x) for x in grupo[col_qty]])) if col_qty else 0
                     total_valor = float(sum([self._limpiar_numero(x) for x in grupo[col_total]])) if col_total else 0.0
 
-                    # Usamos el PO real si existe, si no inventamos uno HIST
                     po_real = str(primera.get(col_po, '')).strip()
                     if not po_real or po_real.lower() == 'nan':
                         po_real = f"HIST-{invoice_num}"
@@ -155,14 +157,10 @@ class IngestorOPBASE:
                     db_client.table("sales_orders").upsert(cabecera, on_conflict="po_number").execute()
                     
                     res_search = db_client.table("sales_orders").select("id").eq("po_number", po_real).execute()
-                    
-                    if not res_search.data: 
-                        errores_log.append(f"No se pudo recuperar ID para {po_real}")
-                        continue
-                        
+                    if not res_search.data: continue
                     order_id = res_search.data[0]['id']
 
-                    # ITEM DATA
+                    # --- ITEMS ---
                     items_batch = []
                     col_desc = next((c for c in df.columns if 'desc' in c.lower()), 'Descrip')
                     col_flor = next((c for c in df.columns if 'flor' in c.lower()), 'flor')
@@ -175,16 +173,24 @@ class IngestorOPBASE:
                         item["product_name"] = nombre_prod
                         item["flower_type"] = tipo_flor
 
-                        if (not tipo_flor or len(tipo_flor) < 3) and registros_procesados < 10: 
+                        # --- MODIFICACIÓN CRÍTICA PARA ACTIVAR IA ---
+                        # Antes: if (not tipo_flor...)  <-- Esto lo frenaba si ya tenía flor
+                        # Ahora: Siempre intenta enriquecer si estamos en los primeros 50 registros
+                        if registros_procesados < 50: 
+                            # Llamada a GPT
                             datos_ia = analizar_texto_con_ia(nombre_prod, "producto")
+                            
                             if datos_ia:
-                                item["variety"] = datos_ia.get("variety")
-                                item["color"] = datos_ia.get("color")
-                                item["grade"] = datos_ia.get("grade")
-                                if not item["flower_type"]: 
-                                    item["flower_type"] = datos_ia.get("flower_type")
+                                # Solo sobrescribimos si GPT nos da algo mejor o nuevo
+                                if datos_ia.get("variety"): item["variety"] = datos_ia.get("variety")
+                                if datos_ia.get("color"): item["color"] = datos_ia.get("color")
+                                if datos_ia.get("grade"): item["grade"] = datos_ia.get("grade")
+                                # Si no teníamos tipo de flor, usamos el de GPT
+                                if not item["flower_type"]: item["flower_type"] = datos_ia.get("flower_type")
+                                
                                 productos_limpiados_ia += 1
 
+                        # Mapeo normal
                         for campo_sql, posibles in mapeo_columnas.items():
                             val_final = None
                             for nombre_excel in posibles:
@@ -197,7 +203,6 @@ class IngestorOPBASE:
                                     else:
                                         if pd.notna(raw): val_final = str(raw)
                                     break
-                            
                             if val_final is not None:
                                 item[campo_sql] = val_final
 
