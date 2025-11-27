@@ -35,7 +35,7 @@ async def router_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['estado_panel'] = None
         await show_orders_page(update, context)
 
-    # B. Ver Detalle
+    # B. Ver Detalle (El Manifiesto Completo)
     elif data.startswith("view_order_"):
         order_id = data.split("_")[-1]
         context.user_data['current_editing_id'] = order_id
@@ -64,7 +64,7 @@ async def router_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "create_manual":
         await create_manual_order(update, context)
 
-# --- 3. PROCESADOR DE INPUT ---
+# --- 3. PROCESADOR DE INPUT (El Escriba Universal) ---
 async def procesar_input_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     estado = context.user_data.get('estado_panel')
     if not estado or not estado.startswith("editing_"):
@@ -74,13 +74,29 @@ async def procesar_input_panel(update: Update, context: ContextTypes.DEFAULT_TYP
     order_id = context.user_data.get('editing_id')
     field_alias = estado.split("_")[1]
     
+    # MAPA EXPANDIDO: Conectamos los deseos del usuario con las columnas de Supabase
     col_map = {
+        # Logística Básica
         'awb': 'awb',
         'hawb': 'hawb',
         'fly': 'fly_date',
+        'ship': 'ship_date',
+        'cajas': 'quantity_boxes',
+        'box': 'box_type',
+        'mark': 'mark_code',
+        
+        # Financiero
         'price': 'unit_price_purchase',
         'pr': 'pr',
-        'cajas': 'quantity_boxes'
+        'pcuc': 'pcuc',
+        'vc': 'vc',
+        'factor': 'factor_1_25',
+        'credits': 'credits',
+        'sugg': 'suggested_price',
+        
+        # Identificadores
+        'po': 'po_consecutive',
+        'inv': 'invoice_number'
     }
     
     db_col = col_map.get(field_alias)
@@ -88,14 +104,14 @@ async def procesar_input_panel(update: Update, context: ContextTypes.DEFAULT_TYP
     if db_col and order_id:
         try:
             supabase.table(TABLE_NAME).update({db_col: text}).eq("id", order_id).execute()
-            await update.message.reply_text(f"✅ *{field_alias.upper()}* guardado.", parse_mode='Markdown')
+            await update.message.reply_text(f"✅ *{field_alias.upper()}* mutado a: `{text}`", parse_mode='Markdown')
         except Exception as e:
             await update.message.reply_text(f"❌ Error DB: {e}")
     
     context.user_data['estado_panel'] = None
     
-    keyboard = [[InlineKeyboardButton("🔙 Volver a la Orden", callback_data=f"view_order_{order_id}")]]
-    await update.message.reply_text("¿Siguiente paso?", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = [[InlineKeyboardButton("🔙 Volver al Manifiesto", callback_data=f"view_order_{order_id}")]]
+    await update.message.reply_text("¿Siguiente movimiento?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 # --- VISTAS ---
 
@@ -103,7 +119,6 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     page = context.user_data.get('current_page', 0)
     
     try:
-        # CONSULTA RESILIENTE
         response = supabase.table(TABLE_NAME)\
             .select("id, customer_code, po_komet, fly_date, ship_date, status, product_name")\
             .order("created_at", desc=True)\
@@ -123,20 +138,15 @@ async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
     
     if not orders:
-        header += "🍂 No hay órdenes recientes."
+        header += "🍂 El vacío nos contempla (Sin órdenes)."
     else:
         for o in orders:
-            # Manejo de nulos seguro
             cust = (o.get('customer_code') or "??")[:4]
             po = (o.get('po_komet') or "NO-PO")[-5:]
-            
-            # Fecha: Si no hay vuelo, mostramos ship_date
-            fecha = o.get('fly_date')
-            if not fecha:
-                fecha = o.get('ship_date') or "SinFecha"
-            
+            fecha = o.get('fly_date') or o.get('ship_date') or "SinFecha"
             status = o.get('status') or "New"
-            icon = "🟢" if status == 'Ready' else "🔴"
+            
+            icon = "🟢" if status == 'Ready' else "🔴" if 'Pending' in status else "⚠️"
             
             btn_txt = f"{icon} {cust} | {po} | {fecha}"
             keyboard.append([InlineKeyboardButton(btn_txt, callback_data=f"view_order_{o['id']}")])
@@ -159,25 +169,54 @@ async def show_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     try:
         data = supabase.table(TABLE_NAME).select("*").eq("id", order_id).execute().data[0]
     except Exception as e:
-        await update.callback_query.edit_message_text(f"❌ Error recuperando orden: {e}")
+        await update.callback_query.edit_message_text(f"❌ La orden se ha disuelto en la nada: {e}")
         return
 
-    po_int = data.get('po_consecutive') or '---'
-    inv = data.get('invoice_number') or 'NO GEN'
-    fly = data.get('fly_date') or '---'
-    ship = data.get('ship_date') or '---'
+    # --- EXTRACCIÓN DE LA VERDAD ---
+    def g(key, default="---"): return str(data.get(key) or default)
+    def money(key): return str(data.get(key) or 0)
+
+    # Bloque Identidad
+    po_int = g('po_consecutive', '⚠️ PENDIENTE')
+    inv = g('invoice_number', 'NO GENERADA')
     
+    # Bloque Producto
+    cajas_txt = f"{g('quantity_boxes')} (Conf: {g('confirmed_boxes')})"
+    stems = g('total_stems', 0)
+    
+    # Bloque Financiero Complejo
+    # [PCUC | VC | PR]
+    fin_row1 = f"PCUC: {money('pcuc')} | VC: {money('vc')} | PR: {money('pr')}"
+    # [Fac 1.25 | Valor T | Sugerido]
+    fin_row2 = f"F.1.25: {money('factor_1_25')} | Val T: {money('valor_t')}"
+    fin_row3 = f"Sug: {money('suggested_price')} | Venta: {money('unit_price_purchase')}"
+    fin_row4 = f"Créditos: {money('credits')} | Cash: {money('cash_payment')}"
+
     txt = (
-        f"📦 *ORDEN:* `{data.get('po_komet')}`\n"
-        f"👤 *Cliente:* {data.get('customer_code')}\n"
-        f"🌹 *Item:* {data.get('product_name')}\n"
-        f"🔢 *PO Interna:* `{po_int}`\n"
-        f"🚢 *Ship:* {ship} | ✈️ *Fly:* {fly}\n"
-        f"🛫 *AWB:* `{data.get('awb') or '---'}`\n"
-        f"🏭 *Finca:* {data.get('vendor') or '---'}\n"
-        f"💵 *Venta:* ${data.get('unit_price_purchase') or 0}\n"
-        f"📄 *Invoice:* `{inv}`\n"
-        f"📝 *Notas:* {data.get('notes')}"
+        f"📦 *MANIFIESTO DE ORDEN* `{g('po_komet')}`\n"
+        f"👤 *Cliente:* {g('customer_code')} ({g('status_komet')})\n"
+        f"🏷️ *Prod:* {g('product_name')}\n"
+        f"📦 *Pack:* {g('box_type')} | Marca: {g('mark_code')}\n"
+        f"📊 *Cant:* {cajas_txt} Cajas | {stems} Tallos\n"
+        f"📍 *Origen:* {g('origin')} | Finca: {g('vendor')}\n\n"
+        
+        f"✈️ *LOGÍSTICA*\n"
+        f"Ship: {g('ship_date')} | Fly: {g('fly_date')}\n"
+        f"AWB: `{g('awb')}`\n"
+        f"HAWB: `{g('hawb')}`\n"
+        f"UDV: {g('udv')}\n\n"
+        
+        f"💰 *INGENIERÍA FINANCIERA*\n"
+        f"{fin_row3}\n"
+        f"{fin_row1}\n"
+        f"{fin_row2}\n"
+        f"{fin_row4}\n\n"
+        
+        f"📝 *CONTROL*\n"
+        f"PO Int: `{po_int}`\n"
+        f"Invoice: `{inv}`\n"
+        f"Farm Inv: `{g('farm_invoice')}`\n"
+        f"Notas: _{g('notes')}_"
     )
 
     keyboard = [
@@ -186,7 +225,7 @@ async def show_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             InlineKeyboardButton("💰 Finanzas", callback_data=f"menu_fin_{order_id}")
         ],
         [
-            InlineKeyboardButton("📄 Docs", callback_data=f"menu_docs_{order_id}"),
+            InlineKeyboardButton("📄 Documentos", callback_data=f"menu_docs_{order_id}"),
             InlineKeyboardButton("🔙 Volver", callback_data="panel_back")
         ]
     ]
@@ -197,18 +236,26 @@ async def show_submenu(update: Update, context: ContextTypes.DEFAULT_TYPE, data:
     menu_type = parts[1]
     order_id = parts[2]
     
-    txt = f"⚙️ *Menú {menu_type.upper()}*"
+    txt = f"⚙️ *Ajuste de Tuercas: {menu_type.upper()}*"
     keyboard = []
     
     if menu_type == "log":
         keyboard = [
-            [InlineKeyboardButton("✏️ Editar AWB", callback_data=f"edit_awb_{order_id}")],
-            [InlineKeyboardButton("✏️ Editar Fecha Vuelo", callback_data=f"edit_fly_{order_id}")]
+            [InlineKeyboardButton("✏️ AWB", callback_data=f"edit_awb_{order_id}"), 
+             InlineKeyboardButton("✏️ HAWB", callback_data=f"edit_hawb_{order_id}")],
+            [InlineKeyboardButton("✏️ Fly Date", callback_data=f"edit_fly_{order_id}"),
+             InlineKeyboardButton("✏️ Ship Date", callback_data=f"edit_ship_{order_id}")],
+            [InlineKeyboardButton("✏️ Tipo Caja", callback_data=f"edit_box_{order_id}"),
+             InlineKeyboardButton("✏️ Marca", callback_data=f"edit_mark_{order_id}")]
         ]
     elif menu_type == "fin":
         keyboard = [
-            [InlineKeyboardButton("✏️ Precio Venta", callback_data=f"edit_price_{order_id}")],
-            [InlineKeyboardButton("✏️ Precio Compra", callback_data=f"edit_pr_{order_id}")]
+            [InlineKeyboardButton("✏️ Precio Venta", callback_data=f"edit_price_{order_id}"),
+             InlineKeyboardButton("✏️ PR (Costo)", callback_data=f"edit_pr_{order_id}")],
+            [InlineKeyboardButton("✏️ PCUC", callback_data=f"edit_pcuc_{order_id}"),
+             InlineKeyboardButton("✏️ VC", callback_data=f"edit_vc_{order_id}")],
+            [InlineKeyboardButton("✏️ Créditos", callback_data=f"edit_credits_{order_id}"),
+             InlineKeyboardButton("✏️ Factor 1.25", callback_data=f"edit_factor_{order_id}")]
         ]
     elif menu_type == "docs":
         keyboard = [
@@ -216,7 +263,8 @@ async def show_submenu(update: Update, context: ContextTypes.DEFAULT_TYPE, data:
             [InlineKeyboardButton("📑 Generar INV#", callback_data=f"action_geninv_{order_id}")]
         ]
 
-    keyboard.append([InlineKeyboardButton("🔙 Volver", callback_data=f"view_order_{order_id}")])
+    keyboard.append([InlineKeyboardButton("🔙 Volver al Manifiesto", callback_data=f"view_order_{order_id}")])
+    
     await update.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def execute_action(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str):
@@ -227,6 +275,7 @@ async def execute_action(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
     col = ""
     
     if action == "genpo":
+        # TODO: Conectar con tabla 'system_sequences' real
         new_val = f"PO-{datetime.now().strftime('%m%d%H%M')}"
         col = "po_consecutive"
     elif action == "geninv":
@@ -235,16 +284,16 @@ async def execute_action(update: Update, context: ContextTypes.DEFAULT_TYPE, dat
         
     try:
         supabase.table(TABLE_NAME).update({col: new_val}).eq("id", order_id).execute()
-        await update.callback_query.answer(f"✅ Generado: {new_val}")
+        await update.callback_query.answer(f"✅ Realidad alterada: {new_val}")
         await show_order_detail(update, context, order_id)
     except Exception as e:
-        await update.callback_query.answer("❌ Error al generar")
+        await update.callback_query.answer("❌ Error en la matrix")
 
 async def create_manual_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         new_row = {
             "status": "Manual_Pending",
-            "notes": "Creado en Telegram",
+            "notes": "Génesis manual desde Telegram",
             "created_at": datetime.now().isoformat()
         }
         res = supabase.table(TABLE_NAME).insert(new_row).execute()
