@@ -9,24 +9,18 @@ logger = logging.getLogger(__name__)
 
 class IngestorOPBASE:
     """
-    El Historiador Inteligente (Versión Blindada v2).
-    Corrige el error de 'select' en upsert y maneja la ingesta masiva.
+    El Historiador Inteligente (Versión Corregida - Mapeo Limpio).
     """
 
     def _limpiar_numero(self, valor):
-        """Convierte '1.200,50', '$ 50', '0,36' a float puro."""
         if pd.isna(valor): return 0.0
         s = str(valor).strip()
         if not s: return 0.0
-        
         s = s.replace('$', '').replace(' ', '')
-        
-        # Lógica de decimales latinos vs gringos
         if ',' in s and '.' in s:
             s = s.replace('.', '').replace(',', '.')
         elif ',' in s:
             s = s.replace(',', '.')
-            
         try: return float(s)
         except: return 0.0
 
@@ -74,10 +68,9 @@ class IngestorOPBASE:
             errores_log = []
             productos_limpiados_ia = 0
 
-            # 4. MAPEO
+            # 4. MAPEO (SOLO COLUMNAS QUE EXISTEN EN SALES_ITEMS)
+            # Quitamos po_number, status, awb, hawb porque van en sales_orders
             mapeo_columnas = {
-                "po_number": ["PO#", "PO"],
-                "status": ["Status"],
                 "product_code": ["Code"],
                 "boxes": ["Quantity", "Cajas"],
                 "box_type": ["UOM"],
@@ -95,8 +88,6 @@ class IngestorOPBASE:
                 "sleeve_type": ["Carton //Sleeve", "Sleeve"],
                 "stems_per_bunch": ["tallos"],
                 "total_units": ["total tallos"],
-                "awb": ["awb", "AWB"],
-                "hawb": ["hija", "HAWB"],
                 "unit_price_stems": ["precio unt st"],
                 "stems_per_box": ["tallos por cja"],
                 "order_kind": ["tipo de orden"],
@@ -127,21 +118,25 @@ class IngestorOPBASE:
                 try:
                     primera = grupo.iloc[0]
                     
+                    # HEADER DATA
                     col_fly = next((c for c in df.columns if 'fly' in c.lower()), None)
                     col_finca = next((c for c in df.columns if 'finca' in c.lower()), None)
                     col_awb = next((c for c in df.columns if 'awb' in c.lower()), None)
                     col_hija = next((c for c in df.columns if 'hija' in c.lower()), None)
                     col_qty = next((c for c in df.columns if 'quan' in c.lower()), None)
                     col_total = next((c for c in df.columns if 'venta total' in c.lower()), None)
+                    col_po = next((c for c in df.columns if 'po' in c.lower()), 'PO#') # PO Real
                     
                     total_cajas = int(sum([self._limpiar_numero(x) for x in grupo[col_qty]])) if col_qty else 0
                     total_valor = float(sum([self._limpiar_numero(x) for x in grupo[col_total]])) if col_total else 0.0
 
-                    # Prefijo HIST para no chocar con POs vivas
-                    po_number_val = f"HIST-{invoice_num}"
+                    # Usamos el PO real si existe, si no inventamos uno HIST
+                    po_real = str(primera.get(col_po, '')).strip()
+                    if not po_real or po_real.lower() == 'nan':
+                        po_real = f"HIST-{invoice_num}"
 
                     cabecera = {
-                        "po_number": po_number_val, 
+                        "po_number": po_real, 
                         "invoice_number": str(invoice_num),
                         "vendor": str(primera.get(col_finca, 'VARIOUS')),
                         "customer_name": str(primera.get(col_cust, 'UNKNOWN')),
@@ -157,19 +152,17 @@ class IngestorOPBASE:
                         "total_value": total_valor
                     }
                     
-                    # --- CORRECCIÓN: UPSERT SIN SELECT ---
                     db_client.table("sales_orders").upsert(cabecera, on_conflict="po_number").execute()
                     
-                    # Recuperar ID (Doble Check)
-                    res_search = db_client.table("sales_orders").select("id").eq("po_number", po_number_val).execute()
+                    res_search = db_client.table("sales_orders").select("id").eq("po_number", po_real).execute()
                     
-                    if not res_search.data:
-                        errores_log.append(f"No se pudo crear cabecera {invoice_num}")
+                    if not res_search.data: 
+                        errores_log.append(f"No se pudo recuperar ID para {po_real}")
                         continue
                         
                     order_id = res_search.data[0]['id']
 
-                    # --- ITEMS ---
+                    # ITEM DATA
                     items_batch = []
                     col_desc = next((c for c in df.columns if 'desc' in c.lower()), 'Descrip')
                     col_flor = next((c for c in df.columns if 'flor' in c.lower()), 'flor')
@@ -177,7 +170,6 @@ class IngestorOPBASE:
                     for _, row in grupo.iterrows():
                         item = {"order_id": order_id}
                         
-                        # IA
                         nombre_prod = str(row.get(col_desc, ''))
                         tipo_flor = str(row.get(col_flor, ''))
                         item["product_name"] = nombre_prod
@@ -193,7 +185,6 @@ class IngestorOPBASE:
                                     item["flower_type"] = datos_ia.get("flower_type")
                                 productos_limpiados_ia += 1
 
-                        # Mapeo
                         for campo_sql, posibles in mapeo_columnas.items():
                             val_final = None
                             for nombre_excel in posibles:
@@ -213,7 +204,6 @@ class IngestorOPBASE:
                         items_batch.append(item)
 
                     if items_batch:
-                        # Limpieza previa para evitar duplicados al re-subir
                         db_client.table("sales_items").delete().eq("order_id", order_id).execute()
                         db_client.table("sales_items").insert(items_batch).execute()
                         registros_procesados += len(items_batch)
