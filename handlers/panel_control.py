@@ -1,292 +1,270 @@
-"""
-panel_control.py
-Módulo de Inteligencia Líquida para la gestión de órdenes en Telegram.
-Reemplaza la tiranía del Excel ORDENAA con la libertad de Supabase.
-"""
-
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, CallbackQueryHandler
-from services.supabase_client import supabase  # Asumo que existe y está configurado
+from telegram.ext import ContextTypes
+from services.supabase_client import supabase
 from datetime import datetime
 
-# Configuración de Logging con un toque de seriedad
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+# Configuración de Logging
 logger = logging.getLogger(__name__)
 
-# Estados para conversaciones si fueran necesarias (por ahora manejaremos mucho con callbacks)
-SELECTING_ACTION, EDITING_FIELD = range(2)
-
-# Constantes de Paginación
+# Constantes
 ITEMS_PER_PAGE = 5
 
-async def cmd_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- 1. COMANDO PRINCIPAL (/panel) ---
+async def comando_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Punto de entrada: El despertar del panel.
-    Muestra las órdenes activas (Status != 'Shipped' o filtro por defecto).
+    Punto de entrada: Inicializa el panel y muestra la primera página.
     """
-    user = update.effective_user
-    logger.info(f"Usuario {user.id} invocando el orden desde el caos.")
-    
-    # Limpiamos contexto previo
+    # Limpiamos estados previos para evitar conflictos
     context.user_data['current_page'] = 0
-    context.user_data['filters'] = {"status": "Pending"} # Filtro inicial por defecto
+    context.user_data['estado_panel'] = None 
+    context.user_data['current_editing_id'] = None
     
+    # Invocamos la vista de listado
     await show_orders_page(update, context)
 
-async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- 2. ROUTER DEL PANEL (El Cerebro de Navegación) ---
+async def router_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Renderiza una página de la lista de órdenes tipo 'ORDENAA'.
+    Distribuye los clics de los botones del panel a su función correspondiente.
     """
-    page = context.user_data.get('current_page', 0)
-    filters = context.user_data.get('filters', {})
+    query = update.callback_query
+    await query.answer() # Confirmar a Telegram que recibimos el clic
     
-    # 1. Consulta a Supabase (Simulación de query compleja)
-    # En producción: services.order_service.get_orders(page, filters)
+    data = query.data
+    
+    # A. Navegación y Listados
+    if "page_" in data:
+        current_page = context.user_data.get('current_page', 0)
+        if "next" in data:
+            context.user_data['current_page'] = current_page + 1
+        elif "prev" in data and current_page > 0:
+            context.user_data['current_page'] = current_page - 1
+        await show_orders_page(update, context)
+        
+    elif data == "panel_refresh" or data == "panel_back":
+        # Volver al inicio / Recargar
+        context.user_data['estado_panel'] = None
+        await show_orders_page(update, context)
+
+    # B. Ver Detalle de Orden
+    elif data.startswith("view_order_"):
+        order_id = data.split("_")[-1]
+        context.user_data['current_editing_id'] = order_id
+        await show_order_detail(update, context, order_id)
+
+    # C. Submenús (Logística, Finanzas, etc.)
+    elif data.startswith("menu_"):
+        await show_submenu(update, context, data)
+
+    # D. Activar Edición (Pone al bot a escuchar texto)
+    elif data.startswith("edit_"):
+        # data ej: edit_awb_UUID
+        parts = data.split("_")
+        field = parts[1] # awb, hawb, price
+        order_id = parts[2]
+        
+        # Guardamos qué estamos editando
+        context.user_data['estado_panel'] = f"editing_{field}"
+        context.user_data['editing_id'] = order_id
+        
+        txt = f"✍️ *Editando {field.upper()}*\n\nPor favor, escribe el nuevo valor:"
+        await query.edit_message_text(txt, parse_mode='Markdown')
+
+    # E. Acciones Ejecutables (Generar cosas)
+    elif data.startswith("action_"):
+        await execute_action(update, context, data)
+
+    # F. Creación Manual
+    elif data == "create_manual":
+        await create_manual_order(update, context)
+
+# --- 3. PROCESADOR DE INPUT DE TEXTO (Cuando el usuario escribe) ---
+async def procesar_input_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Captura el texto escrito por el usuario si está en modo edición del panel.
+    """
+    estado = context.user_data.get('estado_panel')
+    if not estado or not estado.startswith("editing_"):
+        return
+
+    text = update.message.text
+    order_id = context.user_data.get('editing_id')
+    field_alias = estado.split("_")[1] # awb, hawb, price...
+    
+    # Mapeo de alias a columnas reales de Supabase
+    col_map = {
+        'awb': 'awb',
+        'hawb': 'hawb',
+        'fly': 'fly_date',
+        'price': 'unit_price_purchase',
+        'pr': 'pr',
+        'cajas': 'quantity_boxes'
+    }
+    
+    db_col = col_map.get(field_alias)
+    
+    if db_col and order_id:
+        try:
+            # Actualizamos Supabase
+            supabase.table("staging_orders").update({db_col: text}).eq("id", order_id).execute()
+            await update.message.reply_text(f"✅ *{field_alias.upper()}* actualizado a: `{text}`", parse_mode='Markdown')
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error guardando en BD: {e}")
+    
+    # Reseteamos estado y volvemos al detalle
+    context.user_data['estado_panel'] = None
+    
+    # Truco: Mostramos de nuevo el detalle para seguir trabajando
+    # (Necesitamos volver a invocar show_order_detail, pero requiere update distinto)
+    # Por simplicidad, enviamos un botón para volver
+    keyboard = [[InlineKeyboardButton("🔙 Volver a la Orden", callback_data=f"view_order_{order_id}")]]
+    await update.message.reply_text("¿Qué más deseas hacer?", reply_markup=InlineKeyboardMarkup(keyboard))
+
+# --- FUNCIONES AUXILIARES (VISTAS) ---
+
+async def show_orders_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    page = context.user_data.get('current_page', 0)
+    
     try:
+        # Consulta a Supabase
         response = supabase.table("staging_orders")\
-            .select("*")\
+            .select("id, customer_code, po_komet, fly_date, status")\
             .order("created_at", desc=True)\
             .range(page * ITEMS_PER_PAGE, (page + 1) * ITEMS_PER_PAGE - 1)\
             .execute()
-        
         orders = response.data
     except Exception as e:
-        logger.error(f"Error fatal en la matrix de datos: {e}")
-        text_method = update.message.reply_text if update.message else update.callback_query.message.reply_text
-        await text_method("🔥 Error de conexión con la Inteligencia Líquida.")
-        return
-
-    if not orders:
-        text = "🍂 No hay órdenes en este limbo (staging) por ahora."
-        keyboard = [[InlineKeyboardButton("🔄 Recargar", callback_data="panel_refresh")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
+        logger.error(f"Error Supabase: {e}")
+        txt = "🔥 Error conectando a la Inteligencia Líquida (Supabase)."
         if update.callback_query:
-            await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
+            await update.callback_query.edit_message_text(txt)
         else:
-            await update.message.reply_text(text, reply_markup=reply_markup)
+            await update.message.reply_text(txt)
         return
 
-    # 2. Construcción de la vista (El 'Render' del Excel)
+    # Construir listado
+    header = f"📋 *PANEL ORDENAA (Pág {page})*\n\n"
     keyboard = []
     
-    # Encabezado visual (Customer | PO | Vuelo | Status)
-    header_text = "📋 *PANEL ORDENAA* \n_Cust | PO# | Vuelo | Status_\n" + "—" * 20 + "\n"
-    
-    for order in orders:
-        # Formateo resiliente ante datos nulos
-        cust = (order.get('customer_code') or "???")[:4]
-        po = (order.get('po_komet') or "N/A")[-5:] # Últimos 5 chars
-        fly = order.get('fly_date') or "Sin Fecha"
-        status = order.get('status') or "New"
-        
-        # Icono de estado
-        icon = "🟢" if status == 'Ready' else "🔴" if 'Pending' in status else "⚠️"
-        
-        btn_text = f"{icon} {cust} | {po} | {fly}"
-        callback_data = f"view_order_{order['id']}"
-        keyboard.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
+    if not orders:
+        header += "🍂 No hay órdenes en el horizonte."
+    else:
+        for o in orders:
+            cust = (o.get('customer_code') or "???")[:5]
+            po = (o.get('po_komet') or "NO-PO")[-5:]
+            fly = o.get('fly_date') or "SinFecha"
+            status = o.get('status') or "New"
+            
+            icon = "🟢" if status == 'Ready' else "🔴"
+            btn_txt = f"{icon} {cust} | {po} | {fly}"
+            keyboard.append([InlineKeyboardButton(btn_txt, callback_data=f"view_order_{o['id']}")])
 
-    # Controles de Paginación
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(InlineKeyboardButton("⬅️ Anterior", callback_data="page_prev"))
-    nav_buttons.append(InlineKeyboardButton("➕ Manual", callback_data="create_manual")) # El Problemita solver
-    nav_buttons.append(InlineKeyboardButton("➡️ Siguiente", callback_data="page_next"))
-    
-    keyboard.append(nav_buttons)
-    keyboard.append([InlineKeyboardButton("🔄 Actualizar Todo", callback_data="panel_refresh")])
+    # Botones de navegación
+    nav = []
+    if page > 0: nav.append(InlineKeyboardButton("⬅️", callback_data="page_prev"))
+    nav.append(InlineKeyboardButton("➕ Manual", callback_data="create_manual"))
+    nav.append(InlineKeyboardButton("🔄", callback_data="panel_refresh"))
+    nav.append(InlineKeyboardButton("➡️", callback_data="page_next"))
+    keyboard.append(nav)
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     if update.callback_query:
-        await update.callback_query.edit_message_text(text=header_text, reply_markup=reply_markup, parse_mode='Markdown')
+        await update.callback_query.edit_message_text(header, reply_markup=reply_markup, parse_mode='Markdown')
     else:
-        await update.message.reply_text(text=header_text, reply_markup=reply_markup, parse_mode='Markdown')
+        await update.message.reply_text(header, reply_markup=reply_markup, parse_mode='Markdown')
 
-async def order_details_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Vista detallada de una orden específica. Aquí es donde ocurre la magia de edición.
-    """
-    query = update.callback_query
-    await query.answer()
-    
-    order_id = query.data.split("_")[-1]
-    context.user_data['current_editing_id'] = order_id
-    
-    # Fetch fresh data
-    data = supabase.table("staging_orders").select("*").eq("id", order_id).execute().data[0]
-    
-    # Renderizado del "Manifiesto de la Orden"
-    # Mapeo a las columnas conceptuales solicitadas
+async def show_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: str):
+    # Fetch full data
+    try:
+        data = supabase.table("staging_orders").select("*").eq("id", order_id).execute().data[0]
+    except IndexError:
+        await update.callback_query.edit_message_text("❌ Orden no encontrada.")
+        return
+
     txt = (
-        f"📦 *DETALLE DE ORDEN* \n"
-        f"🆔 `{data.get('id')}`\n\n"
+        f"📦 *DETALLE ORDEN* `{data.get('po_komet')}`\n"
         f"👤 *Cliente:* {data.get('customer_code')}\n"
-        f"🔖 *PO Komet:* `{data.get('po_komet')}`\n"
-        f"🔢 *PO Interna:* `{data.get('po_consecutive') or 'Pendiente'}`\n"
-        f"✈️ *Vuelo:* {data.get('fly_date') or '⚠️ Definir'}\n"
-        f"🏭 *Finca:* {data.get('vendor') or '⚠️ Asignar'}\n"
-        f"📄 *Invoice:* `{data.get('invoice_number') or 'NO GENERADA'}`\n"
-        f"📦 *Cajas:* {data.get('quantity_boxes')} x {data.get('box_type')}\n"
-        f"💐 *Tallos:* {data.get('total_stems')}\n"
-        f"💵 *Venta:* ${data.get('unit_price_purchase')} | Costo: ${data.get('pr') or 0}\n"
-        f"📝 *Notas:* {data.get('notes')}\n"
+        f"🔢 *PO Interna:* `{data.get('po_consecutive') or '---'}`\n"
+        f"✈️ *Vuelo:* {data.get('fly_date') or '---'}\n"
         f"🛫 *AWB:* `{data.get('awb') or '---'}`\n"
+        f"🏭 *Finca:* {data.get('vendor') or '---'}\n"
+        f"💰 *Venta:* ${data.get('unit_price_purchase') or 0} | *Costo:* ${data.get('pr') or 0}\n"
+        f"📄 *Invoice:* `{data.get('invoice_number') or 'NO GENERADA'}`"
     )
 
-    # Menú de acciones categorizadas (Clusters)
     keyboard = [
         [
             InlineKeyboardButton("✈️ Logística", callback_data=f"menu_log_{order_id}"),
             InlineKeyboardButton("💰 Finanzas", callback_data=f"menu_fin_{order_id}")
         ],
         [
-            InlineKeyboardButton("📦 Empaque", callback_data=f"menu_pack_{order_id}"),
-            InlineKeyboardButton("📝 Control/ID", callback_data=f"menu_ctrl_{order_id}")
-        ],
-        [
-             InlineKeyboardButton("📄 Generar PDF Finca", callback_data=f"gen_pdf_farm_{order_id}"),
-             InlineKeyboardButton("📑 Facturar Cliente", callback_data=f"gen_inv_client_{order_id}")
-        ],
-        [InlineKeyboardButton("🔙 Volver al Listado", callback_data="panel_back")]
+            InlineKeyboardButton("📄 Generar Docs", callback_data=f"menu_docs_{order_id}"),
+            InlineKeyboardButton("🔙 Volver", callback_data="panel_back")
+        ]
     ]
-    
-    await query.edit_message_text(text=txt, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    await update.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-async def sub_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Manejador genérico para los submenús (Logística, Finanzas, etc.)
-    """
-    query = update.callback_query
-    data = query.data
-    order_id = data.split("_")[-1]
-    menu_type = data.split("_")[1] # log, fin, pack, ctrl
+async def show_submenu(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str):
+    parts = data.split("_")
+    menu_type = parts[1]
+    order_id = parts[2]
     
+    txt = f"⚙️ *Menú {menu_type.upper()}*"
     keyboard = []
-    text_prompt = ""
     
     if menu_type == "log":
-        text_prompt = "✈️ *Edición Logística*"
         keyboard = [
-            [InlineKeyboardButton("Editar Fecha Vuelo", callback_data=f"edit_fly_date_{order_id}")],
-            [InlineKeyboardButton("Editar AWB", callback_data=f"edit_awb_{order_id}")],
-            [InlineKeyboardButton("Editar HAWB", callback_data=f"edit_hawb_{order_id}")]
+            [InlineKeyboardButton("✏️ Editar AWB", callback_data=f"edit_awb_{order_id}")],
+            [InlineKeyboardButton("✏️ Editar Fecha Vuelo", callback_data=f"edit_fly_{order_id}")]
         ]
     elif menu_type == "fin":
-        text_prompt = "💰 *Edición Financiera*"
         keyboard = [
-            [InlineKeyboardButton("Precio Venta", callback_data=f"edit_price_{order_id}")],
-            [InlineKeyboardButton("Precio Compra (PR)", callback_data=f"edit_pr_{order_id}")]
+            [InlineKeyboardButton("✏️ Precio Venta", callback_data=f"edit_price_{order_id}")],
+            [InlineKeyboardButton("✏️ Precio Compra (PR)", callback_data=f"edit_pr_{order_id}")]
         ]
-    elif menu_type == "ctrl":
-        text_prompt = "📝 *Control e Identificadores*\nGenerar consecutivos irrevocables."
+    elif menu_type == "docs":
         keyboard = [
-            [InlineKeyboardButton("🎲 Asignar PO Consecutivo", callback_data=f"action_gen_po_{order_id}")],
-            [InlineKeyboardButton("🔢 Asignar Invoice #", callback_data=f"action_gen_inv_{order_id}")]
+            [InlineKeyboardButton("🎲 Generar PO# Consec", callback_data=f"action_genpo_{order_id}")],
+            [InlineKeyboardButton("📑 Generar Invoice#", callback_data=f"action_geninv_{order_id}")]
         ]
 
-    keyboard.append([InlineKeyboardButton("🔙 Volver a Detalle", callback_data=f"view_order_{order_id}")])
+    keyboard.append([InlineKeyboardButton("🔙 Volver al Detalle", callback_data=f"view_order_{order_id}")])
     
-    await query.edit_message_text(text=text_prompt, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    await update.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-async def manual_creation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    El 'Problemita': Crear orden desde cero (Email vago).
-    Aquí inyectamos una fila en blanco inteligente en Supabase y llevamos al usuario a editarla.
-    """
-    query = update.callback_query
-    await query.answer("Iniciando protocolo de emergencia manual...")
+async def execute_action(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str):
+    action = data.split("_")[1] # genpo, geninv
+    order_id = data.split("_")[2]
     
-    # 1. Crear fila vacía con defaults
-    new_order = {
-        "status": "Manual_Pending",
-        "notes": "Creado manualmente desde Telegram",
-        "created_at": datetime.now().isoformat()
-        # La IA debería sugerir datos aquí en una v2
-    }
+    # Simulación de generación de consecutivos (Aquí conectarás tu lógica real luego)
+    new_val = ""
+    col = ""
     
-    data = supabase.table("staging_orders").insert(new_order).execute()
-    new_id = data.data[0]['id']
-    
-    # 2. Redirigir al detalle para que edite
-    # Hack: Modificamos el callback data para simular que clicó en una orden
-    query.data = f"view_order_{new_id}"
-    await order_details_handler(update, context)
-
-async def generate_consecutive_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Lógica crítica: Generación de consecutivos (PO o Invoice).
-    Reemplaza la hoja INDICES.
-    """
-    query = update.callback_query
-    action_type = query.data.split("_")[2] # 'po' o 'inv'
-    order_id = query.data.split("_")[-1]
-    
-    # Aquí iría la llamada a tu servicio de secuencias (system_sequences)
-    # Por ahora simulamos la "inteligencia"
-    
-    # Fetch current order to get context (Finca, Date)
-    order = supabase.table("staging_orders").select("*").eq("id", order_id).execute().data[0]
-    
-    if action_type == 'po':
-        # Lógica: Finca + YYMMDD + / + Seq
-        finca = order.get('vendor', 'GEN')[:3]
-        date_str = datetime.now().strftime("%y%m%d")
-        # TODO: Llamar a DB function get_next_sequence('PO', f"{finca}-{date_str}")
-        simulated_seq = "0869" # Simulación
-        new_val = f"{finca}{date_str}/{simulated_seq}"
-        field = "po_consecutive"
+    if action == "genpo":
+        new_val = f"PO-{datetime.now().strftime('%m%d')}-X"
+        col = "po_consecutive"
+    elif action == "geninv":
+        new_val = f"INV-{datetime.now().strftime('%m%d')}-99"
+        col = "invoice_number"
         
-    elif action_type == 'inv':
-        # Lógica: YYMMDD + / + Seq
-        date_str = datetime.now().strftime("%y%m%d")
-        # TODO: Llamar a DB function get_next_sequence('INV', date_str)
-        simulated_seq = "0790"
-        new_val = f"{date_str}/{simulated_seq}"
-        field = "invoice_number"
+    try:
+        supabase.table("staging_orders").update({col: new_val}).eq("id", order_id).execute()
+        await update.callback_query.answer(f"✅ Generado: {new_val}")
+        # Recargamos la vista detalle
+        await show_order_detail(update, context, order_id)
+    except Exception as e:
+        await update.callback_query.answer("❌ Error al generar")
 
-    # Update Supabase
-    supabase.table("staging_orders").update({field: new_val}).eq("id", order_id).execute()
-    
-    await query.answer(f"🔮 Consecutivo generado: {new_val}")
-    
-    # Refrescar vista
-    query.data = f"view_order_{order_id}"
-    await order_details_handler(update, context)
-
-async def navigation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manejo de paginación"""
-    query = update.callback_query
-    current = context.user_data.get('current_page', 0)
-    
-    if "next" in query.data:
-        context.user_data['current_page'] = current + 1
-    elif "prev" in query.data and current > 0:
-        context.user_data['current_page'] = current - 1
-    elif "refresh" in query.data:
-        pass # Solo recarga
-    elif "back" in query.data:
-        # Volver al listado
-        pass 
-        
-    await show_orders_page(update, context)
-
-# --- Dispatcher Setup ---
-def register_handlers(application):
-    """
-    Registra los handlers en la aplicación principal.
-    """
-    application.add_handler(CommandHandler("panel", cmd_panel))
-    application.add_handler(CommandHandler("ordenaa", cmd_panel))
-    
-    # Callback router: El corazón del flujo
-    application.add_handler(CallbackQueryHandler(navigation_handler, pattern="^page_|^panel_"))
-    application.add_handler(CallbackQueryHandler(order_details_handler, pattern="^view_order_"))
-    application.add_handler(CallbackQueryHandler(sub_menu_handler, pattern="^menu_"))
-    application.add_handler(CallbackQueryHandler(manual_creation_handler, pattern="^create_manual"))
-    application.add_handler(CallbackQueryHandler(generate_consecutive_handler, pattern="^action_gen_"))
-    
-    # Aquí faltarían los handlers de edición específicos (ConversationHandler o Input text)
-    # Pero por brevedad del prompt, la estructura base está lista.
+async def create_manual_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        # Insertar fila vacía
+        new_row = {"status": "Manual", "created_at": datetime.now().isoformat()}
+        res = supabase.table("staging_orders").insert(new_row).execute()
+        new_id = res.data[0]['id']
+        # Ir a editarla
+        context.user_data['current_editing_id'] = new_id
+        await show_order_detail(update, context, new_id)
+    except Exception as e:
+        logger.error(f"Error creating manual: {e}")
