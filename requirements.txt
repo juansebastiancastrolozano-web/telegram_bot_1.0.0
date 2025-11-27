@@ -14,3 +14,5 @@ tabulate
 
 reportlab
 jinja2
+
+openai
